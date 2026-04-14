@@ -544,7 +544,7 @@ def process_question(message):
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
     ensure_user(message.from_user.id)
-    payment_text = "Оплата уже доступна." if YOOKASSA_ENABLED else "Оплата скоро будет доступна."
+    payment_text = "Оплата уже доступна." if YOOKASSA_ENABLED else "Сейчас доступен выбор тарифа, оплата будет подключена позже."
 
     bot.send_message(
         message.chat.id,
@@ -599,21 +599,9 @@ def btn_model(message):
 
 @bot.message_handler(func=lambda m: m.text == "💳 Пополнить баланс")
 def btn_payments(message):
-    if not YOOKASSA_ENABLED:
-        bot.send_message(
-            message.chat.id,
-            "💳 Оплата пока не настроена.\n\n"
-            "Скоро здесь появится пополнение баланса через ЮKassa.",
-            reply_markup=get_main_keyboard()
-        )
-        return
-
     bot.send_message(
         message.chat.id,
-        "Выбери тариф пополнения:\n\n"
-        "• 50 запросов — 250 ₽\n"
-        "• 100 запросов — 400 ₽\n"
-        "• 200 запросов — 750 ₽",
+        "Выбери тариф пополнения:",
         reply_markup=get_payments_keyboard()
     )
 
@@ -649,16 +637,6 @@ def callback_model(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("payplan:"))
 def callback_payplan(call):
-    if not YOOKASSA_ENABLED:
-        bot.answer_callback_query(call.id, "Оплата пока не настроена")
-        bot.send_message(
-            call.message.chat.id,
-            "💳 ЮKassa пока не подключена.\n"
-            "Когда появятся shop_id и secret_key, оплата заработает без изменения логики бота.",
-            reply_markup=get_main_keyboard()
-        )
-        return
-
     plan_key = call.data.split("payplan:", 1)[1]
 
     if plan_key not in PAY_PLANS:
@@ -666,6 +644,19 @@ def callback_payplan(call):
         return
 
     plan = PAY_PLANS[plan_key]
+
+    if not YOOKASSA_ENABLED:
+        bot.answer_callback_query(call.id, "Тариф выбран")
+        bot.send_message(
+            call.message.chat.id,
+            f"💳 Ты выбрал тариф:\n\n"
+            f"*{plan['label']}* — *{plan['amount']} ₽*\n\n"
+            f"ЮKassa пока не подключена.\n"
+            f"Скоро здесь появится ссылка на оплату.",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
     payment_id, confirmation_url = create_yookassa_payment(call.from_user.id, plan_key)
 
     if not payment_id or not confirmation_url:
