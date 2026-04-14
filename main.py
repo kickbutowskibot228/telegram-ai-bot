@@ -18,9 +18,16 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID")
 YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY")
 YOOKASSA_RETURN_URL = os.getenv("YOOKASSA_RETURN_URL")
+
+YOOKASSA_ENABLED = all([
+    YOOKASSA_SHOP_ID,
+    YOOKASSA_SECRET_KEY,
+    YOOKASSA_RETURN_URL
+])
 
 PORT = int(os.environ.get("PORT", 10000))
 
@@ -29,15 +36,6 @@ if not TELEGRAM_TOKEN:
 
 if not OPENROUTER_API_KEY:
     raise RuntimeError("Не задан OPENROUTER_API_KEY")
-
-if not YOOKASSA_SHOP_ID:
-    raise RuntimeError("Не задан YOOKASSA_SHOP_ID")
-
-if not YOOKASSA_SECRET_KEY:
-    raise RuntimeError("Не задан YOOKASSA_SECRET_KEY")
-
-if not YOOKASSA_RETURN_URL:
-    raise RuntimeError("Не задан YOOKASSA_RETURN_URL")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown")
 app = Flask(__name__)
@@ -369,6 +367,10 @@ def call_openrouter(model: str, message: str, max_retries: int = 3):
 # YooKassa
 # =========================
 def create_yookassa_payment(user_id: int, plan_key: str):
+    if not YOOKASSA_ENABLED:
+        logger.warning("YooKassa не настроена")
+        return None, None
+
     if plan_key not in PAY_PLANS:
         return None, None
 
@@ -542,11 +544,14 @@ def process_question(message):
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
     ensure_user(message.from_user.id)
+    payment_text = "Оплата уже доступна." if YOOKASSA_ENABLED else "Оплата скоро будет доступна."
+
     bot.send_message(
         message.chat.id,
         "Привет! Я AI-бот.\n\n"
         "Просто напиши вопрос, и я отвечу.\n"
-        "Сначала тратится платный баланс, затем бесплатный лимит.",
+        "Сначала тратится платный баланс, затем бесплатный лимит.\n\n"
+        f"{payment_text}",
         reply_markup=get_main_keyboard()
     )
 
@@ -594,6 +599,15 @@ def btn_model(message):
 
 @bot.message_handler(func=lambda m: m.text == "💳 Пополнить баланс")
 def btn_payments(message):
+    if not YOOKASSA_ENABLED:
+        bot.send_message(
+            message.chat.id,
+            "💳 Оплата пока не настроена.\n\n"
+            "Скоро здесь появится пополнение баланса через ЮKassa.",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
     bot.send_message(
         message.chat.id,
         "Выбери тариф пополнения:\n\n"
@@ -635,6 +649,16 @@ def callback_model(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("payplan:"))
 def callback_payplan(call):
+    if not YOOKASSA_ENABLED:
+        bot.answer_callback_query(call.id, "Оплата пока не настроена")
+        bot.send_message(
+            call.message.chat.id,
+            "💳 ЮKassa пока не подключена.\n"
+            "Когда появятся shop_id и secret_key, оплата заработает без изменения логики бота.",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
     plan_key = call.data.split("payplan:", 1)[1]
 
     if plan_key not in PAY_PLANS:
@@ -692,7 +716,7 @@ def home():
         "status": "ok",
         "service": "telegram-bot",
         "telegram_webhook": True,
-        "yookassa_webhook": True
+        "yookassa_enabled": YOOKASSA_ENABLED
     }, 200
 
 
@@ -715,6 +739,9 @@ def telegram_webhook():
 
 @app.route("/yookassa/webhook", methods=["POST"])
 def yookassa_webhook():
+    if not YOOKASSA_ENABLED:
+        return "disabled", 200
+
     data = request.get_json(silent=True)
 
     if not data:
@@ -767,4 +794,5 @@ setup_telegram_webhook()
 
 if __name__ == "__main__":
     logger.info("🚀 Bot started on port %s", PORT)
+    logger.info("YooKassa enabled: %s", YOOKASSA_ENABLED)
     app.run(host="0.0.0.0", port=PORT, debug=False)
