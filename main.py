@@ -65,22 +65,19 @@ TEXT_MODEL_COSTS = {
 }
 
 IMAGE_MODELS = {
-    "google/gemini-3.1-flash-image-preview": "🍌 Nano Banana 2",
     "google/gemini-3-pro-image-preview": "🍌 Nano Banana Pro"
 }
 
 PROMPT_ONLY_COSTS = {
-    "google/gemini-3.1-flash-image-preview": 6,
     "google/gemini-3-pro-image-preview": 10
 }
 
 PHOTO_PROMPT_COSTS = {
-    "google/gemini-3.1-flash-image-preview": 8,
     "google/gemini-3-pro-image-preview": 12
 }
 
 DEFAULT_MODEL = "google/gemini-3-flash-preview"
-DEFAULT_IMAGE_MODEL = "google/gemini-3.1-flash-image-preview"
+DEFAULT_IMAGE_MODEL = "google/gemini-3-pro-image-preview"
 
 PAY_PLANS = {
     "small": {"label": f"800 {TOKEN_EMOJI}", "amount": 250, "tokens": 800},
@@ -103,7 +100,7 @@ def init_db():
             free_tokens INTEGER NOT NULL DEFAULT 40,
             paid_tokens INTEGER NOT NULL DEFAULT 0,
             image_mode INTEGER NOT NULL DEFAULT 0,
-            image_model TEXT NOT NULL DEFAULT 'google/gemini-3.1-flash-image-preview',
+            image_model TEXT NOT NULL DEFAULT 'google/gemini-3-pro-image-preview',
             image_flow TEXT DEFAULT '',
             pending_image_prompt TEXT DEFAULT ''
         )
@@ -116,7 +113,7 @@ def init_db():
     if "image_mode" not in existing_columns:
         cur.execute("ALTER TABLE users ADD COLUMN image_mode INTEGER NOT NULL DEFAULT 0")
     if "image_model" not in existing_columns:
-        cur.execute("ALTER TABLE users ADD COLUMN image_model TEXT NOT NULL DEFAULT 'google/gemini-3.1-flash-image-preview'")
+        cur.execute("ALTER TABLE users ADD COLUMN image_model TEXT NOT NULL DEFAULT 'google/gemini-3-pro-image-preview'")
     if "image_flow" not in existing_columns:
         cur.execute("ALTER TABLE users ADD COLUMN image_flow TEXT DEFAULT ''")
     if "pending_image_prompt" not in existing_columns:
@@ -418,22 +415,20 @@ def get_models_keyboard():
     return kb
 
 
-def get_nano_models_keyboard():
-    kb = types.InlineKeyboardMarkup()
-    for model_id, model_name in IMAGE_MODELS.items():
-        prompt_cost = PROMPT_ONLY_COSTS.get(model_id, 1)
-        photo_cost = PHOTO_PROMPT_COSTS.get(model_id, 1)
-        kb.add(types.InlineKeyboardButton(
-            f"{model_name} — {prompt_cost}/{photo_cost} {TOKEN_EMOJI}",
-            callback_data=f"imgmodel:{model_id}"
-        ))
-    return kb
-
-
 def get_nano_actions_keyboard():
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🎨 По промту", callback_data="imgflow:prompt_only"))
-    kb.add(types.InlineKeyboardButton("🖼 По фото + промту", callback_data="imgflow:photo_plus_prompt"))
+    kb.add(
+        types.InlineKeyboardButton(
+            "Генерация по запросу (Текст)",
+            callback_data="imgflow:prompt_only"
+        )
+    )
+    kb.add(
+        types.InlineKeyboardButton(
+            "Редактирование фото (Фото+Текст)",
+            callback_data="imgflow:photo_plus_prompt"
+        )
+    )
     return kb
 
 
@@ -830,8 +825,7 @@ def process_nano_prompt_only(message):
     data = get_user_data(user_id)
     model = data["image_model"]
     model_name = IMAGE_MODELS.get(model, model)
-    flow = "prompt_only"
-    cost = get_image_cost(model, flow)
+    cost = get_image_cost(model, "prompt_only")
     total_tokens = data["free_tokens"] + data["paid_tokens"]
 
     if total_tokens < cost:
@@ -845,13 +839,17 @@ def process_nano_prompt_only(message):
 
     prompt_text = (message.text or "").strip()
     if not prompt_text:
-        bot.send_message(message.chat.id, "Напиши промт одним сообщением.", reply_markup=get_image_mode_keyboard())
+        bot.send_message(
+            message.chat.id,
+            "Напиши текстовый запрос одним сообщением.",
+            reply_markup=get_image_mode_keyboard()
+        )
         return
 
     wait_msg = bot.send_message(
         message.chat.id,
         f"🍌 Генерирую изображение через *{model_name}*...\n"
-        f"Режим: *по промту*"
+        f"Режим: *Генерация по запросу (Текст)*"
     )
 
     result = generate_image_openrouter(model=model, prompt_text=prompt_text)
@@ -901,7 +899,7 @@ def process_nano_prompt_only(message):
     send_generated_image_both(
         chat_id=message.chat.id,
         file_path=file_path,
-        caption_preview=f"🍌 {model_name}\n🎨 Генерация по промту",
+        caption_preview=f"🍌 {model_name}\n🎨 Генерация по запросу",
         caption_file="📎 Оригинал без сжатия"
     )
 
@@ -911,15 +909,14 @@ def process_nano_photo_plus_prompt(message):
     data = get_user_data(user_id)
     model = data["image_model"]
     model_name = IMAGE_MODELS.get(model, model)
-    flow = "photo_plus_prompt"
-    cost = get_image_cost(model, flow)
+    cost = get_image_cost(model, "photo_plus_prompt")
     total_tokens = data["free_tokens"] + data["paid_tokens"]
 
     if total_tokens < cost:
         bot.send_message(
             message.chat.id,
             f"❌ Недостаточно {TOKEN_EMOJI} для *{model_name}*.\n\n"
-            f"Стоимость генерации: *{cost}* {TOKEN_EMOJI}",
+            f"Стоимость редактирования: *{cost}* {TOKEN_EMOJI}",
             reply_markup=get_image_mode_keyboard()
         )
         return
@@ -928,15 +925,15 @@ def process_nano_photo_plus_prompt(message):
     if not prompt_text:
         bot.send_message(
             message.chat.id,
-            "🖼 Отправь фото *с подписью*, что нужно изменить или сгенерировать.",
+            "🖼 Отправь фото *с подписью*, что нужно изменить.",
             reply_markup=get_image_mode_keyboard()
         )
         return
 
     wait_msg = bot.send_message(
         message.chat.id,
-        f"🍌 Генерирую изображение через *{model_name}*...\n"
-        f"Режим: *по фото + промту*"
+        f"🍌 Обрабатываю изображение через *{model_name}*...\n"
+        f"Режим: *Редактирование фото (Фото+Текст)*"
     )
 
     try:
@@ -971,7 +968,7 @@ def process_nano_photo_plus_prompt(message):
         safe_edit_message(
             message.chat.id,
             wait_msg.message_id,
-            f"❌ Не удалось списать {TOKEN_EMOJI} после генерации.",
+            f"❌ Не удалось списать {TOKEN_EMOJI} после обработки.",
             reply_markup=get_image_mode_keyboard()
         )
         return
@@ -981,7 +978,7 @@ def process_nano_photo_plus_prompt(message):
         safe_edit_message(
             message.chat.id,
             wait_msg.message_id,
-            "❌ Не удалось сохранить сгенерированное изображение.",
+            "❌ Не удалось сохранить обработанное изображение.",
             reply_markup=get_image_mode_keyboard()
         )
         return
@@ -1002,7 +999,7 @@ def process_nano_photo_plus_prompt(message):
     send_generated_image_both(
         chat_id=message.chat.id,
         file_path=file_path,
-        caption_preview=f"🍌 {model_name}\n🖼 Генерация по фото + промту",
+        caption_preview=f"🍌 {model_name}\n🖼 Редактирование фото",
         caption_file="📎 Оригинал без сжатия"
     )
 
@@ -1024,7 +1021,7 @@ def cmd_start(message):
         "Привет! Я AI-бот 🤖\n\n"
         "Что я умею:\n"
         "• отвечать на вопросы\n"
-        "• генерировать изображения через Nano Banana\n"
+        "• генерировать изображения через Nano Banana Pro\n"
         "• менять текстовые модели\n\n"
         "Нажми *🧠 GPT/Gemini/Claude*, чтобы выбрать модель и задать вопрос.",
         reply_markup=get_main_keyboard()
@@ -1099,6 +1096,7 @@ def btn_text_models(message):
 @bot.message_handler(func=lambda m: m.text == "🍌 Nano Banana")
 def btn_nano_banana(message):
     set_image_mode(message.from_user.id, True)
+    set_image_model(message.from_user.id, DEFAULT_IMAGE_MODEL)
     set_image_flow(message.from_user.id, "")
     set_pending_image_prompt(message.from_user.id, "")
 
@@ -1108,22 +1106,16 @@ def btn_nano_banana(message):
     bot.send_message(
         message.chat.id,
         f"🍌 *Nano Banana*\n\n"
-        f"Текущая модель: *{current_image_name}*\n"
-        f"По промту: *{PROMPT_ONLY_COSTS.get(data['image_model'], 1)}* {TOKEN_EMOJI}\n"
-        f"По фото + промту: *{PHOTO_PROMPT_COSTS.get(data['image_model'], 1)}* {TOKEN_EMOJI}\n\n"
-        f"Сначала выбери модель или сразу режим генерации:",
+        f"Модель: *{current_image_name}*\n"
+        f"Генерация по запросу: *{PROMPT_ONLY_COSTS.get(data['image_model'], 1)}* {TOKEN_EMOJI}\n"
+        f"Редактирование фото: *{PHOTO_PROMPT_COSTS.get(data['image_model'], 1)}* {TOKEN_EMOJI}\n\n"
+        f"Выбери нужный режим:",
         reply_markup=get_image_mode_keyboard()
     )
 
     bot.send_message(
         message.chat.id,
-        "Выбери сценарий:",
-        reply_markup=get_nano_models_keyboard()
-    )
-
-    bot.send_message(
-        message.chat.id,
-        "Затем выбери один из режимов:",
+        "Доступные действия:",
         reply_markup=get_nano_actions_keyboard()
     )
 
@@ -1180,38 +1172,6 @@ def callback_model(call):
     )
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("imgmodel:"))
-def callback_image_model(call):
-    model = call.data.split("imgmodel:", 1)[1]
-
-    if model not in IMAGE_MODELS:
-        bot.answer_callback_query(call.id, "Неизвестная image-модель")
-        return
-
-    set_image_mode(call.from_user.id, True)
-    set_image_model(call.from_user.id, model)
-
-    model_name = IMAGE_MODELS[model]
-    prompt_cost = PROMPT_ONLY_COSTS.get(model, 1)
-    photo_cost = PHOTO_PROMPT_COSTS.get(model, 1)
-
-    bot.answer_callback_query(call.id, f"Выбрана {model_name}")
-    safe_edit_message(
-        call.message.chat.id,
-        call.message.message_id,
-        f"✅ Выбрана модель *{model_name}*\n"
-        f"🎨 По промту: *{prompt_cost}* {TOKEN_EMOJI}\n"
-        f"🖼 По фото + промту: *{photo_cost}* {TOKEN_EMOJI}",
-        reply_markup=get_image_mode_keyboard()
-    )
-
-    bot.send_message(
-        call.message.chat.id,
-        "Теперь выбери сценарий генерации:",
-        reply_markup=get_nano_actions_keyboard()
-    )
-
-
 @bot.callback_query_handler(func=lambda call: call.data.startswith("imgflow:"))
 def callback_image_flow(call):
     flow = call.data.split("imgflow:", 1)[1]
@@ -1235,10 +1195,10 @@ def callback_image_flow(call):
         safe_edit_message(
             call.message.chat.id,
             call.message.message_id,
-            f"🎨 *{model_name}*\n"
-            f"Режим: *по промту*\n"
+            f"🍌 *{model_name}*\n"
+            f"Режим: *Генерация по запросу (Текст)*\n"
             f"Стоимость: *{cost}* {TOKEN_EMOJI}\n\n"
-            f"Теперь напиши промт одним сообщением.",
+            f"Теперь напиши текстовый запрос одним сообщением.",
             reply_markup=get_image_mode_keyboard()
         )
     else:
@@ -1246,10 +1206,10 @@ def callback_image_flow(call):
         safe_edit_message(
             call.message.chat.id,
             call.message.message_id,
-            f"🖼 *{model_name}*\n"
-            f"Режим: *по фото + промту*\n"
+            f"🍌 *{model_name}*\n"
+            f"Режим: *Редактирование фото (Фото+Текст)*\n"
             f"Стоимость: *{cost}* {TOKEN_EMOJI}\n\n"
-            f"Теперь отправь фото с подписью, что нужно сгенерировать или изменить.",
+            f"Теперь отправь фото с подписью, что нужно изменить.",
             reply_markup=get_image_mode_keyboard()
         )
 
@@ -1318,7 +1278,7 @@ def handle_photo(message):
 
     bot.send_message(
         message.chat.id,
-        "Сейчас выбран другой режим.\nЕсли хочешь генерацию по фото, выбери *🖼 По фото + промту*.",
+        "Сейчас выбран другой режим.\nЕсли хочешь редактирование, выбери *Редактирование фото (Фото+Текст)*.",
         reply_markup=get_image_mode_keyboard()
     )
 
@@ -1348,7 +1308,7 @@ def handle_text(message):
     if data["image_mode"] and data["image_flow"] == "photo_plus_prompt":
         bot.send_message(
             message.chat.id,
-            "🖼 Сейчас включен режим *по фото + промту*.\nОтправь фото с подписью.",
+            "🖼 Сейчас включен режим *Редактирование фото (Фото+Текст)*.\nОтправь фото с подписью.",
             reply_markup=get_image_mode_keyboard()
         )
         return
