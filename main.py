@@ -393,9 +393,16 @@ def update_payment_status(payment_id: str, status: str):
 # =========================
 def get_main_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row("🧠 Спросить", "⚙️ Модели")
-    kb.row("🍌 Nano Banana", "📊 Баланс")
-    kb.row("💳 Купить", "🔄 Сброс")
+    kb.row("📊 Баланс", "💳 Пополнение")
+    kb.row("🍌 Nano Banana", "🔄 Сброс")
+    kb.row("🧠 GPT/Gemini/Claude")
+    return kb
+
+
+def get_image_mode_keyboard():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("📊 Баланс", "💳 Пополнение")
+    kb.row("🍌 Nano Banana", "🔄 Сброс")
     kb.row("❌ Выйти из режима")
     return kb
 
@@ -832,13 +839,13 @@ def process_nano_prompt_only(message):
             message.chat.id,
             f"❌ Недостаточно {TOKEN_EMOJI} для *{model_name}*.\n\n"
             f"Стоимость генерации: *{cost}* {TOKEN_EMOJI}",
-            reply_markup=get_main_keyboard()
+            reply_markup=get_image_mode_keyboard()
         )
         return
 
     prompt_text = (message.text or "").strip()
     if not prompt_text:
-        bot.send_message(message.chat.id, "Напиши промт одним сообщением.", reply_markup=get_main_keyboard())
+        bot.send_message(message.chat.id, "Напиши промт одним сообщением.", reply_markup=get_image_mode_keyboard())
         return
 
     wait_msg = bot.send_message(
@@ -854,7 +861,7 @@ def process_nano_prompt_only(message):
             message.chat.id,
             wait_msg.message_id,
             result["error"],
-            reply_markup=get_main_keyboard()
+            reply_markup=get_image_mode_keyboard()
         )
         return
 
@@ -864,7 +871,7 @@ def process_nano_prompt_only(message):
             message.chat.id,
             wait_msg.message_id,
             f"❌ Не удалось списать {TOKEN_EMOJI} после генерации.",
-            reply_markup=get_main_keyboard()
+            reply_markup=get_image_mode_keyboard()
         )
         return
 
@@ -874,7 +881,7 @@ def process_nano_prompt_only(message):
             message.chat.id,
             wait_msg.message_id,
             "❌ Не удалось сохранить сгенерированное изображение.",
-            reply_markup=get_main_keyboard()
+            reply_markup=get_image_mode_keyboard()
         )
         return
 
@@ -888,7 +895,7 @@ def process_nano_prompt_only(message):
         f"💸 Списано: *{charged}* {TOKEN_EMOJI}\n"
         f"📦 Осталось: *{total_left}* {TOKEN_EMOJI}\n\n"
         f"Ниже отправляю превью и оригинал файлом.",
-        reply_markup=get_main_keyboard()
+        reply_markup=get_image_mode_keyboard()
     )
 
     send_generated_image_both(
@@ -913,7 +920,7 @@ def process_nano_photo_plus_prompt(message):
             message.chat.id,
             f"❌ Недостаточно {TOKEN_EMOJI} для *{model_name}*.\n\n"
             f"Стоимость генерации: *{cost}* {TOKEN_EMOJI}",
-            reply_markup=get_main_keyboard()
+            reply_markup=get_image_mode_keyboard()
         )
         return
 
@@ -922,7 +929,7 @@ def process_nano_photo_plus_prompt(message):
         bot.send_message(
             message.chat.id,
             "🖼 Отправь фото *с подписью*, что нужно изменить или сгенерировать.",
-            reply_markup=get_main_keyboard()
+            reply_markup=get_image_mode_keyboard()
         )
         return
 
@@ -940,7 +947,7 @@ def process_nano_photo_plus_prompt(message):
             message.chat.id,
             wait_msg.message_id,
             "❌ Не удалось скачать фото из Telegram.",
-            reply_markup=get_main_keyboard()
+            reply_markup=get_image_mode_keyboard()
         )
         return
 
@@ -955,7 +962,7 @@ def process_nano_photo_plus_prompt(message):
             message.chat.id,
             wait_msg.message_id,
             result["error"],
-            reply_markup=get_main_keyboard()
+            reply_markup=get_image_mode_keyboard()
         )
         return
 
@@ -965,7 +972,7 @@ def process_nano_photo_plus_prompt(message):
             message.chat.id,
             wait_msg.message_id,
             f"❌ Не удалось списать {TOKEN_EMOJI} после генерации.",
-            reply_markup=get_main_keyboard()
+            reply_markup=get_image_mode_keyboard()
         )
         return
 
@@ -975,7 +982,7 @@ def process_nano_photo_plus_prompt(message):
             message.chat.id,
             wait_msg.message_id,
             "❌ Не удалось сохранить сгенерированное изображение.",
-            reply_markup=get_main_keyboard()
+            reply_markup=get_image_mode_keyboard()
         )
         return
 
@@ -989,7 +996,7 @@ def process_nano_photo_plus_prompt(message):
         f"💸 Списано: *{charged}* {TOKEN_EMOJI}\n"
         f"📦 Осталось: *{total_left}* {TOKEN_EMOJI}\n\n"
         f"Ниже отправляю превью и оригинал файлом.",
-        reply_markup=get_main_keyboard()
+        reply_markup=get_image_mode_keyboard()
     )
 
     send_generated_image_both(
@@ -1007,9 +1014,9 @@ def process_nano_photo_plus_prompt(message):
 def cmd_start(message):
     ensure_user(message.from_user.id)
     payment_text = (
-        f"💳 Покупка {TOKEN_EMOJI} уже доступна."
+        f"💳 Пополнение {TOKEN_EMOJI} уже доступно."
         if YOOKASSA_ENABLED
-        else f"💳 Пополнение скоро будет доступно."
+        else "💳 Пополнение скоро будет доступно."
     )
 
     bot.send_message(
@@ -1018,12 +1025,14 @@ def cmd_start(message):
         "Что я умею:\n"
         "• отвечать на вопросы\n"
         "• генерировать изображения через Nano Banana\n"
-        "• менять модели\n\n"
-        "Быстрый старт:\n"
-        "• *🧠 Спросить* — обычный чат\n"
-        "• *🍌 Nano Banana* — генерация изображений\n"
-        "• *⚙️ Модели* — смена текстовой модели\n\n"
-        f"{payment_text}",
+        "• менять текстовые модели\n\n"
+        "Нажми *🧠 GPT/Gemini/Claude*, чтобы выбрать модель и задать вопрос.",
+        reply_markup=get_main_keyboard()
+    )
+
+    bot.send_message(
+        message.chat.id,
+        payment_text,
         reply_markup=get_main_keyboard()
     )
 
@@ -1042,35 +1051,48 @@ def cmd_restart(message):
 @bot.message_handler(func=lambda m: m.text == "🔄 Сброс")
 def btn_restart(message):
     reset_free_tokens(message.from_user.id)
+    current_keyboard = get_image_mode_keyboard() if get_user_data(message.from_user.id)["image_mode"] else get_main_keyboard()
+
     bot.send_message(
         message.chat.id,
         f"🔄 Бесплатные {TOKEN_EMOJI} сброшены до *{FREE_TOKENS}*.\n"
         f"Платные {TOKEN_EMOJI} сохранены.",
-        reply_markup=get_main_keyboard()
+        reply_markup=current_keyboard
     )
 
 
 @bot.message_handler(func=lambda m: m.text == "📊 Баланс")
 def btn_balance(message):
+    current_keyboard = get_image_mode_keyboard() if get_user_data(message.from_user.id)["image_mode"] else get_main_keyboard()
+
     bot.send_message(
         message.chat.id,
         format_balance_text(message.from_user.id),
-        reply_markup=get_main_keyboard()
+        reply_markup=current_keyboard
     )
 
 
-@bot.message_handler(func=lambda m: m.text == "⚙️ Модели")
-def btn_model(message):
+@bot.message_handler(func=lambda m: m.text == "🧠 GPT/Gemini/Claude")
+def btn_text_models(message):
+    clear_image_state(message.from_user.id)
+
     data = get_user_data(message.from_user.id)
     current_name = TEXT_MODELS.get(data["model"], data["model"])
     current_cost = TEXT_MODEL_COSTS.get(data["model"], 1)
 
     bot.send_message(
         message.chat.id,
-        f"⚙️ Текущая модель: *{current_name}*\n"
+        f"🧠 *Текстовый режим*\n\n"
+        f"Текущая модель: *{current_name}*\n"
         f"Стоимость запроса: *{current_cost}* {TOKEN_EMOJI}\n\n"
-        f"Выбери другую модель:",
+        f"Выбери модель ниже, а потом просто напиши вопрос одним сообщением.",
         reply_markup=get_models_keyboard()
+    )
+
+    bot.send_message(
+        message.chat.id,
+        "После выбора модели просто отправь сообщение с вопросом.",
+        reply_markup=get_main_keyboard()
     )
 
 
@@ -1090,12 +1112,18 @@ def btn_nano_banana(message):
         f"По промту: *{PROMPT_ONLY_COSTS.get(data['image_model'], 1)}* {TOKEN_EMOJI}\n"
         f"По фото + промту: *{PHOTO_PROMPT_COSTS.get(data['image_model'], 1)}* {TOKEN_EMOJI}\n\n"
         f"Сначала выбери модель или сразу режим генерации:",
-        reply_markup=get_nano_models_keyboard()
+        reply_markup=get_image_mode_keyboard()
     )
 
     bot.send_message(
         message.chat.id,
         "Выбери сценарий:",
+        reply_markup=get_nano_models_keyboard()
+    )
+
+    bot.send_message(
+        message.chat.id,
+        "Затем выбери один из режимов:",
         reply_markup=get_nano_actions_keyboard()
     )
 
@@ -1110,22 +1138,20 @@ def btn_exit_mode(message):
     )
 
 
-@bot.message_handler(func=lambda m: m.text == "💳 Купить")
+@bot.message_handler(func=lambda m: m.text == "💳 Пополнение")
 def btn_payments(message):
+    current_keyboard = get_image_mode_keyboard() if get_user_data(message.from_user.id)["image_mode"] else get_main_keyboard()
+
     bot.send_message(
         message.chat.id,
         "Выбери пакет пополнения:",
         reply_markup=get_payments_keyboard()
     )
 
-
-@bot.message_handler(func=lambda m: m.text == "🧠 Спросить")
-def btn_ai(message):
-    clear_image_state(message.from_user.id)
     bot.send_message(
         message.chat.id,
-        "Напиши вопрос одним сообщением.",
-        reply_markup=get_main_keyboard()
+        f"После выбора пакета откроется ссылка на оплату {TOKEN_EMOJI}.",
+        reply_markup=current_keyboard
     )
 
 
@@ -1137,7 +1163,9 @@ def callback_model(call):
         bot.answer_callback_query(call.id, "Неизвестная модель")
         return
 
+    clear_image_state(call.from_user.id)
     set_user_model(call.from_user.id, model)
+
     model_name = TEXT_MODELS[model]
     model_cost = TEXT_MODEL_COSTS.get(model, 1)
 
@@ -1146,7 +1174,8 @@ def callback_model(call):
         call.message.chat.id,
         call.message.message_id,
         f"✅ Текстовая модель изменена на *{model_name}*\n"
-        f"Стоимость запроса: *{model_cost}* {TOKEN_EMOJI}",
+        f"Стоимость запроса: *{model_cost}* {TOKEN_EMOJI}\n\n"
+        f"Теперь просто отправь вопрос следующим сообщением.",
         reply_markup=get_main_keyboard()
     )
 
@@ -1159,6 +1188,7 @@ def callback_image_model(call):
         bot.answer_callback_query(call.id, "Неизвестная image-модель")
         return
 
+    set_image_mode(call.from_user.id, True)
     set_image_model(call.from_user.id, model)
 
     model_name = IMAGE_MODELS[model]
@@ -1172,7 +1202,7 @@ def callback_image_model(call):
         f"✅ Выбрана модель *{model_name}*\n"
         f"🎨 По промту: *{prompt_cost}* {TOKEN_EMOJI}\n"
         f"🖼 По фото + промту: *{photo_cost}* {TOKEN_EMOJI}",
-        reply_markup=get_main_keyboard()
+        reply_markup=get_image_mode_keyboard()
     )
 
     bot.send_message(
@@ -1209,7 +1239,7 @@ def callback_image_flow(call):
             f"Режим: *по промту*\n"
             f"Стоимость: *{cost}* {TOKEN_EMOJI}\n\n"
             f"Теперь напиши промт одним сообщением.",
-            reply_markup=get_main_keyboard()
+            reply_markup=get_image_mode_keyboard()
         )
     else:
         cost = get_image_cost(model, flow)
@@ -1220,7 +1250,7 @@ def callback_image_flow(call):
             f"Режим: *по фото + промту*\n"
             f"Стоимость: *{cost}* {TOKEN_EMOJI}\n\n"
             f"Теперь отправь фото с подписью, что нужно сгенерировать или изменить.",
-            reply_markup=get_main_keyboard()
+            reply_markup=get_image_mode_keyboard()
         )
 
 
@@ -1233,6 +1263,7 @@ def callback_payplan(call):
         return
 
     plan = PAY_PLANS[plan_key]
+    current_keyboard = get_image_mode_keyboard() if get_user_data(call.from_user.id)["image_mode"] else get_main_keyboard()
 
     if not YOOKASSA_ENABLED:
         bot.answer_callback_query(call.id, "Пакет выбран")
@@ -1242,7 +1273,7 @@ def callback_payplan(call):
             f"*{plan['label']}* — *{plan['amount']} ₽*\n\n"
             f"ЮKassa пока не подключена.\n"
             f"Скоро здесь появится ссылка на оплату.",
-            reply_markup=get_main_keyboard()
+            reply_markup=current_keyboard
         )
         return
 
@@ -1253,7 +1284,7 @@ def callback_payplan(call):
         bot.send_message(
             call.message.chat.id,
             "❌ Не удалось создать платеж. Попробуй позже.",
-            reply_markup=get_main_keyboard()
+            reply_markup=current_keyboard
         )
         return
 
@@ -1264,7 +1295,7 @@ def callback_payplan(call):
         f"💵 Стоимость: *{plan['amount']} ₽*\n\n"
         f"Перейди по ссылке для оплаты:\n{confirmation_url}\n\n"
         f"После успешной оплаты {TOKEN_EMOJI} начислятся автоматически.",
-        reply_markup=get_main_keyboard(),
+        reply_markup=current_keyboard,
         disable_web_page_preview=True
     )
 
@@ -1288,7 +1319,7 @@ def handle_photo(message):
     bot.send_message(
         message.chat.id,
         "Сейчас выбран другой режим.\nЕсли хочешь генерацию по фото, выбери *🖼 По фото + промту*.",
-        reply_markup=get_main_keyboard()
+        reply_markup=get_image_mode_keyboard()
     )
 
 
@@ -1297,11 +1328,10 @@ def handle_text(message):
     text = (message.text or "").strip()
 
     ignored_buttons = {
-        "🧠 Спросить",
-        "⚙️ Модели",
+        "🧠 GPT/Gemini/Claude",
         "🍌 Nano Banana",
         "📊 Баланс",
-        "💳 Купить",
+        "💳 Пополнение",
         "🔄 Сброс",
         "❌ Выйти из режима"
     }
@@ -1319,7 +1349,7 @@ def handle_text(message):
         bot.send_message(
             message.chat.id,
             "🖼 Сейчас включен режим *по фото + промту*.\nОтправь фото с подписью.",
-            reply_markup=get_main_keyboard()
+            reply_markup=get_image_mode_keyboard()
         )
         return
 
