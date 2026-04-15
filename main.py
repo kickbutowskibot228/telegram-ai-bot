@@ -1,6 +1,7 @@
 import os
 import time
 import uuid
+import base64
 import sqlite3
 import logging
 import requests
@@ -41,31 +42,55 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown")
 app = Flask(__name__)
 
 DB_PATH = "bot.db"
-FREE_LIMIT = 20
 
-AVAILABLE_MODELS = {
-    "google/gemini-2.0-flash-exp": "Gemini Flash",
-    "openai/gpt-4o-mini": "GPT-4o Mini",
-    "deepseek/deepseek-chat": "DeepSeek Chat"
+FREE_TOKENS = 40
+
+TEXT_MODELS = {
+    "openai/gpt-5.2": "GPT-5.2",
+    "openai/gpt-5.4": "GPT-5.4",
+    "google/gemini-3-flash-preview": "Gemini 3 Flash",
+    "deepseek/deepseek-v3.2": "🐳 DeepSeek V3.2",
+    "anthropic/claude-opus-4.6": "Claude Opus 4.6",
+    "anthropic/claude-sonnet-4.6": "Claude Sonnet 4.6"
 }
 
-DEFAULT_MODEL = "google/gemini-2.0-flash-exp"
+TEXT_MODEL_COSTS = {
+    "deepseek/deepseek-v3.2": 1,
+    "google/gemini-3-flash-preview": 2,
+    "openai/gpt-5.2": 5,
+    "openai/gpt-5.4": 7,
+    "anthropic/claude-sonnet-4.6": 8,
+    "anthropic/claude-opus-4.6": 12
+}
+
+IMAGE_MODELS = {
+    "google/gemini-3.1-flash-image-preview": "🍌 Nano Banana 2",
+    "google/gemini-3-pro-image-preview": "🍌 Nano Banana Pro"
+}
+
+IMAGE_MODEL_COSTS = {
+    "google/gemini-3.1-flash-image-preview": 4,
+    "google/gemini-3-pro-image-preview": 8
+}
+
+DEFAULT_MODEL = "google/gemini-3-flash-preview"
+DEFAULT_IMAGE_MODEL = "google/gemini-3.1-flash-image-preview"
 
 PAY_PLANS = {
-    "50": {
-        "label": "50 запросов",
+    "small": {
+        "label": "800 токенов",
         "amount": 250,
-        "requests": 50
+        "tokens": 800
     },
-    "100": {
-        "label": "100 запросов",
+    "medium": {
+        "label": "1800 токенов",
         "amount": 400,
-        "requests": 100
+        "tokens": 1800
     },
-    "200": {
-        "label": "200 запросов",
+    "large": {
+        "label": "4000 токенов",
         "amount": 750,
-        "requests": 200
+        "tokens": 4000
     }
 }
 
@@ -80,9 +105,11 @@ def init_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
-            model TEXT NOT NULL DEFAULT 'google/gemini-2.0-flash-exp',
-            free_used INTEGER NOT NULL DEFAULT 0,
-            paid_balance INTEGER NOT NULL DEFAULT 0
+            model TEXT NOT NULL DEFAULT 'google/gemini-3-flash-preview',
+            free_tokens INTEGER NOT NULL DEFAULT 40,
+            paid_tokens INTEGER NOT NULL DEFAULT 0,
+            image_mode INTEGER NOT NULL DEFAULT 0,
+            image_model TEXT NOT NULL DEFAULT 'google/gemini-3.1-flash-image-preview'
         )
     """)
 
@@ -94,7 +121,7 @@ def init_db():
             user_id INTEGER NOT NULL,
             plan_key TEXT NOT NULL,
             amount INTEGER NOT NULL,
-            requests_count INTEGER NOT NULL,
+            tokens_count INTEGER NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
@@ -113,9 +140,9 @@ def ensure_user(user_id: int):
 
     if not row:
         cur.execute("""
-            INSERT INTO users (user_id, model, free_used, paid_balance)
-            VALUES (?, ?, ?, ?)
-        """, (user_id, DEFAULT_MODEL, 0, 0))
+            INSERT INTO users (user_id, model, free_tokens, paid_tokens, image_mode, image_model)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (user_id, DEFAULT_MODEL, FREE_TOKENS, 0, 0, DEFAULT_IMAGE_MODEL))
         conn.commit()
 
     conn.close()
@@ -128,7 +155,7 @@ def get_user_data(user_id: int):
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT model, free_used, paid_balance
+        SELECT model, free_tokens, paid_tokens, image_mode, image_model
         FROM users
         WHERE user_id = ?
     """, (user_id,))
@@ -138,14 +165,15 @@ def get_user_data(user_id: int):
 
     return {
         "model": row[0],
-        "free_used": row[1],
-        "paid_balance": row[2]
+        "free_tokens": row[1],
+        "paid_tokens": row[2],
+        "image_mode": bool(row[3]),
+        "image_model": row[4]
     }
 
 
 def set_user_model(user_id: int, model: str):
     ensure_user(user_id)
-
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("UPDATE users SET model = ? WHERE user_id = ?", (model, user_id))
@@ -153,37 +181,53 @@ def set_user_model(user_id: int, model: str):
     conn.close()
 
 
-def reset_free_limit(user_id: int):
+def set_image_mode(user_id: int, enabled: bool):
     ensure_user(user_id)
-
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("UPDATE users SET free_used = 0 WHERE user_id = ?", (user_id,))
+    cur.execute("UPDATE users SET image_mode = ? WHERE user_id = ?", (1 if enabled else 0, user_id))
     conn.commit()
     conn.close()
 
 
-def add_paid_balance(user_id: int, requests_count: int):
+def set_image_model(user_id: int, model: str):
     ensure_user(user_id)
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET image_model = ? WHERE user_id = ?", (model, user_id))
+    conn.commit()
+    conn.close()
 
+
+def reset_free_tokens(user_id: int):
+    ensure_user(user_id)
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET free_tokens = ? WHERE user_id = ?", (FREE_TOKENS, user_id))
+    conn.commit()
+    conn.close()
+
+
+def add_paid_tokens(user_id: int, tokens_count: int):
+    ensure_user(user_id)
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
-        "UPDATE users SET paid_balance = paid_balance + ? WHERE user_id = ?",
-        (requests_count, user_id)
+        "UPDATE users SET paid_tokens = paid_tokens + ? WHERE user_id = ?",
+        (tokens_count, user_id)
     )
     conn.commit()
     conn.close()
 
 
-def consume_one_request(user_id: int):
+def consume_tokens(user_id: int, cost: int):
     ensure_user(user_id)
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT free_used, paid_balance
+        SELECT free_tokens, paid_tokens
         FROM users
         WHERE user_id = ?
     """, (user_id,))
@@ -191,41 +235,54 @@ def consume_one_request(user_id: int):
 
     if not row:
         conn.close()
-        return False, None
+        return False, None, cost
 
-    free_used, paid_balance = row
+    free_tokens, paid_tokens = row
+    total = free_tokens + paid_tokens
 
-    if paid_balance > 0:
+    if total < cost:
+        conn.close()
+        return False, "limit", cost
+
+    if paid_tokens >= cost:
         cur.execute("""
             UPDATE users
-            SET paid_balance = paid_balance - 1
+            SET paid_tokens = paid_tokens - ?
             WHERE user_id = ?
-        """, (user_id,))
+        """, (cost, user_id))
         conn.commit()
         conn.close()
-        return True, "paid"
+        return True, "paid", cost
 
-    if free_used < FREE_LIMIT:
+    if paid_tokens > 0:
+        remaining_cost = cost - paid_tokens
         cur.execute("""
             UPDATE users
-            SET free_used = free_used + 1
+            SET paid_tokens = 0,
+                free_tokens = free_tokens - ?
             WHERE user_id = ?
-        """, (user_id,))
+        """, (remaining_cost, user_id))
         conn.commit()
         conn.close()
-        return True, "free"
+        return True, "mixed", cost
 
+    cur.execute("""
+        UPDATE users
+        SET free_tokens = free_tokens - ?
+        WHERE user_id = ?
+    """, (cost, user_id))
+    conn.commit()
     conn.close()
-    return False, "limit"
+    return True, "free", cost
 
 
-def create_payment_record(payment_id: str, idempotence_key: str, user_id: int, plan_key: str, amount: int, requests_count: int):
+def create_payment_record(payment_id: str, idempotence_key: str, user_id: int, plan_key: str, amount: int, tokens_count: int):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
     cur.execute("""
         INSERT INTO payments
-        (payment_id, idempotence_key, user_id, plan_key, amount, requests_count, status)
+        (payment_id, idempotence_key, user_id, plan_key, amount, tokens_count, status)
         VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (
         payment_id,
@@ -233,7 +290,7 @@ def create_payment_record(payment_id: str, idempotence_key: str, user_id: int, p
         user_id,
         plan_key,
         amount,
-        requests_count,
+        tokens_count,
         "pending"
     ))
 
@@ -246,7 +303,7 @@ def get_payment_by_id(payment_id: str):
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT payment_id, user_id, plan_key, amount, requests_count, status
+        SELECT payment_id, user_id, plan_key, amount, tokens_count, status
         FROM payments
         WHERE payment_id = ?
     """, (payment_id,))
@@ -262,7 +319,7 @@ def get_payment_by_id(payment_id: str):
         "user_id": row[1],
         "plan_key": row[2],
         "amount": row[3],
-        "requests_count": row[4],
+        "tokens_count": row[4],
         "status": row[5]
     }
 
@@ -281,36 +338,50 @@ def update_payment_status(payment_id: str, status: str):
 def get_main_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("🧠 Спросить AI", "⚙️ Модель")
-    kb.row("📊 Остаток", "💳 Пополнить баланс")
-    kb.row("🔄 Restart")
+    kb.row("🖼 Режим изображений", "📊 Баланс токенов")
+    kb.row("💳 Купить токены", "🔄 Restart")
+    kb.row("❌ Выйти из режима изображений")
     return kb
 
 
 def get_models_keyboard():
     kb = types.InlineKeyboardMarkup()
-    for model_id, model_name in AVAILABLE_MODELS.items():
-        kb.add(types.InlineKeyboardButton(model_name, callback_data=f"model:{model_id}"))
+    for model_id, model_name in TEXT_MODELS.items():
+        cost = TEXT_MODEL_COSTS.get(model_id, 1)
+        kb.add(types.InlineKeyboardButton(
+            f"{model_name} — {cost} ток.",
+            callback_data=f"model:{model_id}"
+        ))
+    return kb
+
+
+def get_image_models_keyboard():
+    kb = types.InlineKeyboardMarkup()
+    for model_id, model_name in IMAGE_MODELS.items():
+        cost = IMAGE_MODEL_COSTS.get(model_id, 1)
+        kb.add(types.InlineKeyboardButton(
+            f"{model_name} — {cost} ток.",
+            callback_data=f"imgmodel:{model_id}"
+        ))
     return kb
 
 
 def get_payments_keyboard():
     kb = types.InlineKeyboardMarkup()
     for plan_key, plan in PAY_PLANS.items():
-        kb.add(
-            types.InlineKeyboardButton(
-                f"{plan['label']} — {plan['amount']} ₽",
-                callback_data=f"payplan:{plan_key}"
-            )
-        )
+        kb.add(types.InlineKeyboardButton(
+            f"{plan['label']} — {plan['amount']} ₽",
+            callback_data=f"payplan:{plan_key}"
+        ))
     return kb
 
 
 # =========================
 # OpenRouter
 # =========================
-def call_openrouter(model: str, message: str, max_retries: int = 3):
+def call_openrouter_text(model: str, message: str, max_retries: int = 3):
     url = "https://openrouter.ai/api/v1/chat/completions"
-    fallback_model = "google/gemini-2.0-flash-exp"
+    fallback_model = DEFAULT_MODEL
 
     data = {
         "model": model,
@@ -318,7 +389,7 @@ def call_openrouter(model: str, message: str, max_retries: int = 3):
             {"role": "system", "content": "Отвечай кратко, по делу, на русском языке."},
             {"role": "user", "content": message}
         ],
-        "max_tokens": 400,
+        "max_tokens": 500,
         "temperature": 0.7
     }
 
@@ -331,7 +402,7 @@ def call_openrouter(model: str, message: str, max_retries: int = 3):
                     "Content-Type": "application/json"
                 },
                 json=data,
-                timeout=60
+                timeout=90
             )
 
             if resp.status_code == 200:
@@ -339,28 +410,78 @@ def call_openrouter(model: str, message: str, max_retries: int = 3):
                 return payload["choices"][0]["message"]["content"]
 
             if resp.status_code == 429:
-                wait_time = 2 ** attempt
-                logger.warning("OpenRouter 429, retry in %s sec", wait_time)
-                time.sleep(wait_time)
+                time.sleep(2 ** attempt)
                 continue
 
-            logger.error("OpenRouter error %s: %s", resp.status_code, resp.text)
-
-        except requests.exceptions.Timeout:
-            logger.warning("OpenRouter timeout %s/%s", attempt + 1, max_retries)
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
+            logger.error("OpenRouter text error %s: %s", resp.status_code, resp.text)
 
         except Exception as e:
-            logger.exception("Ошибка запроса к OpenRouter: %s", e)
+            logger.exception("Ошибка text-запроса к OpenRouter: %s", e)
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
 
     if model != fallback_model:
-        logger.warning("Переключение на fallback model: %s", fallback_model)
-        return call_openrouter(fallback_model, message, max_retries=1) + " ⚡"
+        return call_openrouter_text(fallback_model, message, max_retries=1) + " ⚡"
 
     return "⚠️ Не удалось получить ответ от AI. Попробуй ещё раз позже."
+
+
+def telegram_photo_to_data_url(message):
+    photo = message.photo[-1]
+    file_info = bot.get_file(photo.file_id)
+    downloaded_file = bot.download_file(file_info.file_path)
+    encoded = base64.b64encode(downloaded_file).decode("utf-8")
+    return f"data:image/jpeg;base64,{encoded}"
+
+
+def call_openrouter_image(model: str, prompt_text: str, image_data_url: str, max_retries: int = 2):
+    url = "https://openrouter.ai/api/v1/chat/completions"
+
+    final_prompt = prompt_text.strip() if prompt_text and prompt_text.strip() else "Опиши, что изображено на картинке."
+
+    data = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": final_prompt},
+                    {"type": "image_url", "image_url": {"url": image_data_url}}
+                ]
+            }
+        ],
+        "max_tokens": 700,
+        "temperature": 0.5
+    }
+
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json=data,
+                timeout=120
+            )
+
+            if resp.status_code == 200:
+                payload = resp.json()
+                return payload["choices"][0]["message"]["content"]
+
+            if resp.status_code == 429:
+                time.sleep(2 ** attempt)
+                continue
+
+            logger.error("OpenRouter image error %s: %s", resp.status_code, resp.text)
+
+        except Exception as e:
+            logger.exception("Ошибка image-запроса к OpenRouter: %s", e)
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+
+    return "⚠️ Не удалось обработать изображение. Попробуй ещё раз позже."
 
 
 # =========================
@@ -387,11 +508,11 @@ def create_yookassa_payment(user_id: int, plan_key: str):
             "type": "redirect",
             "return_url": YOOKASSA_RETURN_URL
         },
-        "description": f"Пополнение баланса AI-бота: {plan['label']}",
+        "description": f"Пополнение баланса токенов AI-бота: {plan['label']}",
         "metadata": {
             "user_id": str(user_id),
             "plan_key": plan_key,
-            "requests_count": str(plan["requests"])
+            "tokens_count": str(plan["tokens"])
         }
     }
 
@@ -423,9 +544,10 @@ def create_yookassa_payment(user_id: int, plan_key: str):
             user_id=user_id,
             plan_key=plan_key,
             amount=plan["amount"],
-            requests_count=plan["requests"]
+            tokens_count=plan["tokens"]
         )
 
+        logger.info("Создан платеж payment_id=%s user_id=%s plan=%s", payment_id, user_id, plan_key)
         return payment_id, confirmation_url
 
     except Exception as e:
@@ -444,18 +566,20 @@ def apply_payment_if_needed(payment_id: str):
         logger.info("Платеж %s уже обработан", payment_id)
         return True
 
-    add_paid_balance(payment["user_id"], payment["requests_count"])
+    add_paid_tokens(payment["user_id"], payment["tokens_count"])
     update_payment_status(payment_id, "succeeded")
 
     user_data = get_user_data(payment["user_id"])
+    total_tokens = user_data["free_tokens"] + user_data["paid_tokens"]
 
     try:
         bot.send_message(
             payment["user_id"],
             f"✅ Оплата прошла успешно!\n\n"
-            f"Тариф: *{PAY_PLANS[payment['plan_key']]['label']}*\n"
-            f"Начислено: *{payment['requests_count']}* запросов\n"
-            f"Платный баланс: *{user_data['paid_balance']}*",
+            f"Пакет: *{PAY_PLANS[payment['plan_key']]['label']}*\n"
+            f"Начислено: *{payment['tokens_count']}* токенов\n"
+            f"💳 Платных токенов: *{user_data['paid_tokens']}*\n"
+            f"📦 Всего токенов: *{total_tokens}*",
             reply_markup=get_main_keyboard()
         )
     except Exception as e:
@@ -470,16 +594,32 @@ def apply_payment_if_needed(payment_id: str):
 # =========================
 def format_balance_text(user_id: int):
     data = get_user_data(user_id)
-    free_left = max(FREE_LIMIT - data["free_used"], 0)
-    paid_left = data["paid_balance"]
-    total_left = free_left + paid_left
+    free_tokens = data["free_tokens"]
+    paid_tokens = data["paid_tokens"]
+    total_tokens = free_tokens + paid_tokens
 
-    return (
-        f"📊 *Твой баланс запросов*\n\n"
-        f"🆓 Бесплатных осталось: *{free_left}* из *{FREE_LIMIT}*\n"
-        f"💳 Платных осталось: *{paid_left}*\n"
-        f"📦 Всего доступно: *{total_left}*"
-    )
+    lines = [
+        "📊 *Твой баланс токенов*",
+        "",
+        f"🆓 Бесплатных токенов: *{free_tokens}*",
+        f"💳 Платных токенов: *{paid_tokens}*",
+        f"📦 Всего токенов: *{total_tokens}*",
+        "",
+        "💰 Текстовые модели:"
+    ]
+
+    for model_id, model_name in TEXT_MODELS.items():
+        cost = TEXT_MODEL_COSTS.get(model_id, 1)
+        lines.append(f"• {model_name}: *{cost}* ток.")
+
+    lines.append("")
+    lines.append("🖼 Модели изображений:")
+
+    for model_id, model_name in IMAGE_MODELS.items():
+        cost = IMAGE_MODEL_COSTS.get(model_id, 1)
+        lines.append(f"• {model_name}: *{cost}* ток.")
+
+    return "\n".join(lines)
 
 
 def safe_edit_message(chat_id, message_id, text, reply_markup=None):
@@ -497,19 +637,22 @@ def safe_edit_message(chat_id, message_id, text, reply_markup=None):
 
 
 # =========================
-# Message processing
+# Processing
 # =========================
-def process_question(message):
+def process_text_question(message):
     user_id = message.from_user.id
-    user_data_before = get_user_data(user_id)
+    user_data = get_user_data(user_id)
+    model = user_data["model"]
+    model_name = TEXT_MODELS.get(model, model)
+    model_cost = TEXT_MODEL_COSTS.get(model, 1)
 
-    can_use, source = consume_one_request(user_id)
-
-    if not can_use:
+    total_tokens = user_data["free_tokens"] + user_data["paid_tokens"]
+    if total_tokens < model_cost:
         bot.send_message(
             message.chat.id,
-            "❌ Запросы закончились.\n\n"
-            "Попробуй нажать *💳 Пополнить баланс* или сбросить бесплатный лимит через /restart.",
+            f"❌ Недостаточно токенов для модели *{model_name}*.\n\n"
+            f"Стоимость запроса: *{model_cost}* ток.\n"
+            f"Попробуй пополнить баланс или выбрать более дешевую модель.",
             reply_markup=get_main_keyboard()
         )
         return
@@ -517,14 +660,29 @@ def process_question(message):
     msg = bot.send_message(message.chat.id, "🤖 Думаю... ⏳")
     bot.send_chat_action(message.chat.id, "typing")
 
-    answer = call_openrouter(user_data_before["model"], message.text)
+    answer = call_openrouter_text(model, message.text)
+
+    success, source, charged = consume_tokens(user_id, model_cost)
+    if not success:
+        safe_edit_message(
+            message.chat.id,
+            msg.message_id,
+            "❌ Не удалось списать токены. Попробуй ещё раз.",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
     updated = get_user_data(user_id)
+    free_tokens = updated["free_tokens"]
+    paid_tokens = updated["paid_tokens"]
+    total_tokens = free_tokens + paid_tokens
 
-    free_left = max(FREE_LIMIT - updated["free_used"], 0)
-    paid_left = updated["paid_balance"]
-
-    model_name = AVAILABLE_MODELS.get(updated["model"], updated["model"])
-    source_text = "💳 Списано из платного баланса" if source == "paid" else "🆓 Списано из бесплатного лимита"
+    if source == "paid":
+        source_text = "💳 Списано из платных токенов"
+    elif source == "free":
+        source_text = "🆓 Списано из бесплатных токенов"
+    else:
+        source_text = "🪙 Списано из общего баланса токенов"
 
     safe_edit_message(
         message.chat.id,
@@ -532,8 +690,81 @@ def process_question(message):
         f"🤖 *{model_name}*\n\n"
         f"{answer}\n\n"
         f"{source_text}\n"
-        f"🆓 Бесплатных осталось: *{free_left}*\n"
-        f"💳 Платных осталось: *{paid_left}*",
+        f"💸 Списано: *{charged}* ток.\n"
+        f"🆓 Бесплатных: *{free_tokens}*\n"
+        f"💳 Платных: *{paid_tokens}*\n"
+        f"📦 Всего: *{total_tokens}*",
+        reply_markup=get_main_keyboard()
+    )
+
+
+def process_image_question(message):
+    user_id = message.from_user.id
+    user_data = get_user_data(user_id)
+    image_model = user_data["image_model"]
+    model_name = IMAGE_MODELS.get(image_model, image_model)
+    model_cost = IMAGE_MODEL_COSTS.get(image_model, 1)
+
+    total_tokens = user_data["free_tokens"] + user_data["paid_tokens"]
+    if total_tokens < model_cost:
+        bot.send_message(
+            message.chat.id,
+            f"❌ Недостаточно токенов для image-модели *{model_name}*.\n\n"
+            f"Стоимость запроса: *{model_cost}* ток.",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
+    msg = bot.send_message(message.chat.id, f"🖼 Обрабатываю изображение через *{model_name}*...")
+
+    try:
+        image_data_url = telegram_photo_to_data_url(message)
+    except Exception as e:
+        logger.exception("Ошибка скачивания фото из Telegram: %s", e)
+        safe_edit_message(
+            message.chat.id,
+            msg.message_id,
+            "❌ Не удалось получить изображение из Telegram.",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
+    prompt_text = message.caption or "Опиши, что изображено на картинке."
+
+    answer = call_openrouter_image(image_model, prompt_text, image_data_url)
+
+    success, source, charged = consume_tokens(user_id, model_cost)
+    if not success:
+        safe_edit_message(
+            message.chat.id,
+            msg.message_id,
+            "❌ Не удалось списать токены после обработки изображения.",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
+    updated = get_user_data(user_id)
+    free_tokens = updated["free_tokens"]
+    paid_tokens = updated["paid_tokens"]
+    total_tokens = free_tokens + paid_tokens
+
+    if source == "paid":
+        source_text = "💳 Списано из платных токенов"
+    elif source == "free":
+        source_text = "🆓 Списано из бесплатных токенов"
+    else:
+        source_text = "🪙 Списано из общего баланса токенов"
+
+    safe_edit_message(
+        message.chat.id,
+        msg.message_id,
+        f"🖼 *{model_name}*\n\n"
+        f"{answer}\n\n"
+        f"{source_text}\n"
+        f"💸 Списано: *{charged}* ток.\n"
+        f"🆓 Бесплатных: *{free_tokens}*\n"
+        f"💳 Платных: *{paid_tokens}*\n"
+        f"📦 Всего: *{total_tokens}*",
         reply_markup=get_main_keyboard()
     )
 
@@ -544,13 +775,14 @@ def process_question(message):
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
     ensure_user(message.from_user.id)
-    payment_text = "Оплата уже доступна." if YOOKASSA_ENABLED else "Сейчас доступен выбор тарифа, оплата будет подключена позже."
+    payment_text = "Покупка токенов уже доступна." if YOOKASSA_ENABLED else "Сейчас доступен выбор пакета токенов, оплата будет подключена позже."
 
     bot.send_message(
         message.chat.id,
         "Привет! Я AI-бот.\n\n"
-        "Просто напиши вопрос, и я отвечу.\n"
-        "Сначала тратится платный баланс, затем бесплатный лимит.\n\n"
+        "Есть 2 режима:\n"
+        "• обычный текстовый чат\n"
+        "• отдельный режим работы с изображениями\n\n"
         f"{payment_text}",
         reply_markup=get_main_keyboard()
     )
@@ -558,25 +790,27 @@ def cmd_start(message):
 
 @bot.message_handler(commands=["restart"])
 def cmd_restart(message):
-    reset_free_limit(message.from_user.id)
+    reset_free_tokens(message.from_user.id)
     bot.send_message(
         message.chat.id,
-        "🔄 Бесплатный лимит сброшен.\nПлатный баланс не изменен.",
+        f"🔄 Бесплатные токены сброшены до *{FREE_TOKENS}*.\n"
+        f"Платные токены не изменены.",
         reply_markup=get_main_keyboard()
     )
 
 
 @bot.message_handler(func=lambda m: m.text == "🔄 Restart")
 def btn_restart(message):
-    reset_free_limit(message.from_user.id)
+    reset_free_tokens(message.from_user.id)
     bot.send_message(
         message.chat.id,
-        "🔄 Бесплатный лимит сброшен.\nПлатный баланс сохранен.",
+        f"🔄 Бесплатные токены сброшены до *{FREE_TOKENS}*.\n"
+        f"Платные токены сохранены.",
         reply_markup=get_main_keyboard()
     )
 
 
-@bot.message_handler(func=lambda m: m.text == "📊 Остаток")
+@bot.message_handler(func=lambda m: m.text == "📊 Баланс токенов")
 def btn_balance(message):
     bot.send_message(
         message.chat.id,
@@ -588,26 +822,55 @@ def btn_balance(message):
 @bot.message_handler(func=lambda m: m.text == "⚙️ Модель")
 def btn_model(message):
     data = get_user_data(message.from_user.id)
-    current_name = AVAILABLE_MODELS.get(data["model"], data["model"])
+    current_name = TEXT_MODELS.get(data["model"], data["model"])
+    current_cost = TEXT_MODEL_COSTS.get(data["model"], 1)
 
     bot.send_message(
         message.chat.id,
-        f"Текущая модель: *{current_name}*\n\nВыбери новую:",
+        f"Текущая текстовая модель: *{current_name}*\n"
+        f"Стоимость запроса: *{current_cost}* ток.\n\n"
+        f"Выбери новую:",
         reply_markup=get_models_keyboard()
     )
 
 
-@bot.message_handler(func=lambda m: m.text == "💳 Пополнить баланс")
+@bot.message_handler(func=lambda m: m.text == "🖼 Режим изображений")
+def btn_image_mode(message):
+    set_image_mode(message.from_user.id, True)
+    data = get_user_data(message.from_user.id)
+    current_image_name = IMAGE_MODELS.get(data["image_model"], data["image_model"])
+
+    bot.send_message(
+        message.chat.id,
+        f"🖼 Режим изображений включен.\n"
+        f"Текущая модель: *{current_image_name}*\n\n"
+        f"Выбери image-модель или сразу отправь фото с подписью.",
+        reply_markup=get_image_models_keyboard()
+    )
+
+
+@bot.message_handler(func=lambda m: m.text == "❌ Выйти из режима изображений")
+def btn_exit_image_mode(message):
+    set_image_mode(message.from_user.id, False)
+    bot.send_message(
+        message.chat.id,
+        "✅ Режим изображений выключен.\nТеперь бот снова работает как обычный текстовый чат.",
+        reply_markup=get_main_keyboard()
+    )
+
+
+@bot.message_handler(func=lambda m: m.text == "💳 Купить токены")
 def btn_payments(message):
     bot.send_message(
         message.chat.id,
-        "Выбери тариф пополнения:",
+        "Выбери пакет токенов:",
         reply_markup=get_payments_keyboard()
     )
 
 
 @bot.message_handler(func=lambda m: m.text == "🧠 Спросить AI")
 def btn_ai(message):
+    set_image_mode(message.from_user.id, False)
     bot.send_message(
         message.chat.id,
         "Напиши вопрос одним сообщением.",
@@ -619,18 +882,45 @@ def btn_ai(message):
 def callback_model(call):
     model = call.data.split("model:", 1)[1]
 
-    if model not in AVAILABLE_MODELS:
+    if model not in TEXT_MODELS:
         bot.answer_callback_query(call.id, "Неизвестная модель")
         return
 
     set_user_model(call.from_user.id, model)
-    model_name = AVAILABLE_MODELS[model]
+    model_name = TEXT_MODELS[model]
+    model_cost = TEXT_MODEL_COSTS.get(model, 1)
 
     bot.answer_callback_query(call.id, f"Выбрана {model_name}")
     safe_edit_message(
         call.message.chat.id,
         call.message.message_id,
-        f"✅ Модель изменена на *{model_name}*",
+        f"✅ Текстовая модель изменена на *{model_name}*\n"
+        f"Стоимость запроса: *{model_cost}* ток.",
+        reply_markup=get_main_keyboard()
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("imgmodel:"))
+def callback_image_model(call):
+    model = call.data.split("imgmodel:", 1)[1]
+
+    if model not in IMAGE_MODELS:
+        bot.answer_callback_query(call.id, "Неизвестная image-модель")
+        return
+
+    set_image_model(call.from_user.id, model)
+    set_image_mode(call.from_user.id, True)
+
+    model_name = IMAGE_MODELS[model]
+    model_cost = IMAGE_MODEL_COSTS.get(model, 1)
+
+    bot.answer_callback_query(call.id, f"Выбрана {model_name}")
+    safe_edit_message(
+        call.message.chat.id,
+        call.message.message_id,
+        f"✅ Image-модель изменена на *{model_name}*\n"
+        f"Стоимость запроса: *{model_cost}* ток.\n\n"
+        f"Теперь отправь фото с подписью или без подписи.",
         reply_markup=get_main_keyboard()
     )
 
@@ -640,16 +930,16 @@ def callback_payplan(call):
     plan_key = call.data.split("payplan:", 1)[1]
 
     if plan_key not in PAY_PLANS:
-        bot.answer_callback_query(call.id, "Неизвестный тариф")
+        bot.answer_callback_query(call.id, "Неизвестный пакет")
         return
 
     plan = PAY_PLANS[plan_key]
 
     if not YOOKASSA_ENABLED:
-        bot.answer_callback_query(call.id, "Тариф выбран")
+        bot.answer_callback_query(call.id, "Пакет выбран")
         bot.send_message(
             call.message.chat.id,
-            f"💳 Ты выбрал тариф:\n\n"
+            f"💳 Ты выбрал пакет:\n\n"
             f"*{plan['label']}* — *{plan['amount']} ₽*\n\n"
             f"ЮKassa пока не подключена.\n"
             f"Скоро здесь появится ссылка на оплату.",
@@ -671,13 +961,28 @@ def callback_payplan(call):
     bot.answer_callback_query(call.id)
     bot.send_message(
         call.message.chat.id,
-        f"💳 Тариф: *{plan['label']}*\n"
+        f"💳 Пакет: *{plan['label']}*\n"
         f"💵 Стоимость: *{plan['amount']} ₽*\n\n"
         f"Перейди по ссылке для оплаты:\n{confirmation_url}\n\n"
-        f"После успешной оплаты баланс начислится автоматически.",
+        f"После успешной оплаты токены начислятся автоматически.",
         reply_markup=get_main_keyboard(),
         disable_web_page_preview=True
     )
+
+
+@bot.message_handler(content_types=["photo"])
+def handle_photo(message):
+    data = get_user_data(message.from_user.id)
+
+    if not data["image_mode"]:
+        bot.send_message(
+            message.chat.id,
+            "🖼 Чтобы работать с изображениями, сначала включи кнопку *Режим изображений*.",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
+    process_image_question(message)
 
 
 @bot.message_handler(content_types=["text"])
@@ -687,15 +992,27 @@ def handle_text(message):
     ignored_buttons = {
         "🧠 Спросить AI",
         "⚙️ Модель",
-        "📊 Остаток",
-        "💳 Пополнить баланс",
-        "🔄 Restart"
+        "🖼 Режим изображений",
+        "📊 Баланс токенов",
+        "💳 Купить токены",
+        "🔄 Restart",
+        "❌ Выйти из режима изображений"
     }
 
     if text in ignored_buttons:
         return
 
-    process_question(message)
+    data = get_user_data(message.from_user.id)
+
+    if data["image_mode"]:
+        bot.send_message(
+            message.chat.id,
+            "🖼 Сейчас включен режим изображений.\nОтправь фото с подписью или выключи режим кнопкой *❌ Выйти из режима изображений*.",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
+    process_text_question(message)
 
 
 # =========================
