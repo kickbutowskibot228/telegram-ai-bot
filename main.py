@@ -390,17 +390,18 @@ def update_payment_status(payment_id: str, status: str):
 # =========================
 def get_main_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row("📊 Баланс", "💳 Пополнение")
-    kb.row("🍌 Nano Banana", "🔄 Сброс")
     kb.row("🧠 GPT/Gemini/Claude")
+    kb.row("🍌 Nano Banana")
+    kb.row("📊 Баланс", "💳 Пополнение")
+    kb.row("🔄 Сброс")
     return kb
 
 
 def get_image_mode_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("🍌 Nano Banana")
     kb.row("📊 Баланс", "💳 Пополнение")
-    kb.row("🍌 Nano Banana", "🔄 Сброс")
-    kb.row("❌ Выйти из режима")
+    kb.row("❌ Выйти из режима", "🔄 Сброс")
     return kb
 
 
@@ -1168,7 +1169,7 @@ def callback_model(call):
         f"✅ Текстовая модель изменена на *{model_name}*\n"
         f"Стоимость запроса: *{model_cost}* {TOKEN_EMOJI}\n\n"
         f"Теперь просто отправь вопрос следующим сообщением.",
-        reply_markup=get_main_keyboard()
+        reply_markup=None
     )
 
 
@@ -1199,7 +1200,7 @@ def callback_image_flow(call):
             f"Режим: *Генерация по запросу (Текст)*\n"
             f"Стоимость: *{cost}* {TOKEN_EMOJI}\n\n"
             f"Теперь напиши текстовый запрос одним сообщением.",
-            reply_markup=get_image_mode_keyboard()
+            reply_markup=None
         )
     else:
         cost = get_image_cost(model, flow)
@@ -1210,7 +1211,7 @@ def callback_image_flow(call):
             f"Режим: *Редактирование фото (Фото+Текст)*\n"
             f"Стоимость: *{cost}* {TOKEN_EMOJI}\n\n"
             f"Теперь отправь фото с подписью, что нужно изменить.",
-            reply_markup=get_image_mode_keyboard()
+            reply_markup=None
         )
 
 
