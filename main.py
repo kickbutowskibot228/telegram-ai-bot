@@ -50,6 +50,13 @@ GENERATED_DIR = "generated_images"
 
 os.makedirs(GENERATED_DIR, exist_ok=True)
 
+BTN_AI = "🧠 GPT/Gemini/Claude"
+BTN_NANO = "🍌 Nano Banana"
+BTN_BALANCE = "📊 Баланс"
+BTN_TOPUP = "💳 Пополнение"
+BTN_RESET = "🔄 Сброс"
+BTN_EXIT = "❌ Выйти из режима"
+
 TEXT_MODELS = {
     "openai/gpt-5.2": "GPT-5.2",
     "google/gemini-3-flash-preview": "Gemini 3 Flash",
@@ -190,6 +197,11 @@ def get_user_data(user_id: int):
         "image_flow": row[5] or "",
         "pending_image_prompt": row[6] or ""
     }
+
+
+def get_total_tokens(user_id: int):
+    data = get_user_data(user_id)
+    return data["free_tokens"] + data["paid_tokens"]
 
 
 def set_user_model(user_id: int, model: str):
@@ -390,18 +402,18 @@ def update_payment_status(payment_id: str, status: str):
 # =========================
 def get_main_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row("🧠 GPT/Gemini/Claude")
-    kb.row("🍌 Nano Banana")
-    kb.row("📊 Баланс", "💳 Пополнение")
-    kb.row("🔄 Сброс")
+    kb.row(BTN_AI)
+    kb.row(BTN_NANO)
+    kb.row(BTN_BALANCE, BTN_TOPUP)
+    kb.row(BTN_RESET)
     return kb
 
 
 def get_image_mode_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row("🍌 Nano Banana")
-    kb.row("📊 Баланс", "💳 Пополнение")
-    kb.row("❌ Выйти из режима", "🔄 Сброс")
+    kb.row(BTN_NANO)
+    kb.row(BTN_BALANCE, BTN_TOPUP)
+    kb.row(BTN_EXIT, BTN_RESET)
     return kb
 
 
@@ -447,16 +459,10 @@ def get_payments_keyboard():
 # Helpers
 # =========================
 def format_balance_text(user_id: int):
-    data = get_user_data(user_id)
-    free_tokens = data["free_tokens"]
-    paid_tokens = data["paid_tokens"]
-    total_tokens = free_tokens + paid_tokens
-
+    total_tokens = get_total_tokens(user_id)
     return (
         "📊 *Твой баланс*\n\n"
-        f"🆓 Бесплатных: *{free_tokens}* {TOKEN_EMOJI}\n"
-        f"💳 Платных: *{paid_tokens}* {TOKEN_EMOJI}\n"
-        f"📦 Всего: *{total_tokens}* {TOKEN_EMOJI}"
+        f"🍼 *{total_tokens}* токенов"
     )
 
 
@@ -735,8 +741,7 @@ def apply_payment_if_needed(payment_id: str):
     add_paid_tokens(payment["user_id"], payment["tokens_count"])
     update_payment_status(payment_id, "succeeded")
 
-    user_data = get_user_data(payment["user_id"])
-    total_tokens = user_data["free_tokens"] + user_data["paid_tokens"]
+    total_tokens = get_total_tokens(payment["user_id"])
 
     try:
         bot.send_message(
@@ -744,7 +749,7 @@ def apply_payment_if_needed(payment_id: str):
             f"✅ Оплата прошла успешно!\n\n"
             f"Пакет: *{PAY_PLANS[payment['plan_key']]['label']}*\n"
             f"Начислено: *{payment['tokens_count']}* {TOKEN_EMOJI}\n"
-            f"📦 Всего на балансе: *{total_tokens}* {TOKEN_EMOJI}",
+            f"🍼 Баланс: *{total_tokens}* токенов",
             reply_markup=get_main_keyboard()
         )
     except Exception as e:
@@ -769,14 +774,14 @@ def process_text_question(message):
 
     model_name = TEXT_MODELS.get(model, model)
     model_cost = TEXT_MODEL_COSTS.get(model, 1)
+    total_tokens = get_total_tokens(user_id)
 
-    total_tokens = user_data["free_tokens"] + user_data["paid_tokens"]
     if total_tokens < model_cost:
         bot.send_message(
             message.chat.id,
-            f"❌ Недостаточно {TOKEN_EMOJI} для модели *{model_name}*.\n\n"
+            f"❌ Недостаточно токенов для модели *{model_name}*.\n\n"
             f"Стоимость запроса: *{model_cost}* {TOKEN_EMOJI}\n"
-            f"Попробуй пополнить баланс или выбрать более дешевую модель.",
+            f"🍼 Текущий баланс: *{total_tokens}* токенов",
             reply_markup=get_main_keyboard()
         )
         return
@@ -788,32 +793,26 @@ def process_text_question(message):
 
     success, source, charged = consume_tokens(user_id, model_cost)
     if not success:
-        safe_edit_message(
+        bot.edit_message_text(
+            f"❌ Не удалось списать токены. Попробуй ещё раз.\n\n"
+            f"🍼 Баланс: *{get_total_tokens(user_id)}* токенов",
             message.chat.id,
             msg.message_id,
-            f"❌ Не удалось списать {TOKEN_EMOJI}. Попробуй ещё раз.",
+            parse_mode="Markdown",
             reply_markup=get_main_keyboard()
         )
         return
 
-    updated = get_user_data(user_id)
-    total_tokens = updated["free_tokens"] + updated["paid_tokens"]
+    total_left = get_total_tokens(user_id)
 
-    if source == "paid":
-        source_text = "💳 Списано из платных"
-    elif source == "free":
-        source_text = "🆓 Списано из бесплатных"
-    else:
-        source_text = "🪙 Списано из общего баланса"
-
-    safe_edit_message(
-        message.chat.id,
-        msg.message_id,
+    bot.edit_message_text(
         f"🤖 *{model_name}*\n\n"
         f"{answer}\n\n"
-        f"{source_text}\n"
         f"💸 Списано: *{charged}* {TOKEN_EMOJI}\n"
-        f"📦 Осталось: *{total_tokens}* {TOKEN_EMOJI}",
+        f"🍼 Баланс: *{total_left}* токенов",
+        message.chat.id,
+        msg.message_id,
+        parse_mode="Markdown",
         reply_markup=get_main_keyboard()
     )
 
@@ -827,13 +826,14 @@ def process_nano_prompt_only(message):
     model = data["image_model"]
     model_name = IMAGE_MODELS.get(model, model)
     cost = get_image_cost(model, "prompt_only")
-    total_tokens = data["free_tokens"] + data["paid_tokens"]
+    total_tokens = get_total_tokens(user_id)
 
     if total_tokens < cost:
         bot.send_message(
             message.chat.id,
-            f"❌ Недостаточно {TOKEN_EMOJI} для *{model_name}*.\n\n"
-            f"Стоимость генерации: *{cost}* {TOKEN_EMOJI}",
+            f"❌ Недостаточно токенов для *{model_name}*.\n\n"
+            f"Стоимость генерации: *{cost}* {TOKEN_EMOJI}\n"
+            f"🍼 Баланс: *{total_tokens}* токенов",
             reply_markup=get_image_mode_keyboard()
         )
         return
@@ -869,7 +869,8 @@ def process_nano_prompt_only(message):
         safe_edit_message(
             message.chat.id,
             wait_msg.message_id,
-            f"❌ Не удалось списать {TOKEN_EMOJI} после генерации.",
+            f"❌ Не удалось списать токены после генерации.\n\n"
+            f"🍼 Баланс: *{get_total_tokens(user_id)}* токенов",
             reply_markup=get_image_mode_keyboard()
         )
         return
@@ -884,15 +885,14 @@ def process_nano_prompt_only(message):
         )
         return
 
-    updated = get_user_data(user_id)
-    total_left = updated["free_tokens"] + updated["paid_tokens"]
+    total_left = get_total_tokens(user_id)
 
     safe_edit_message(
         message.chat.id,
         wait_msg.message_id,
         f"✅ Изображение готово.\n"
         f"💸 Списано: *{charged}* {TOKEN_EMOJI}\n"
-        f"📦 Осталось: *{total_left}* {TOKEN_EMOJI}\n\n"
+        f"🍼 Баланс: *{total_left}* токенов\n\n"
         f"Ниже отправляю превью и оригинал файлом.",
         reply_markup=get_image_mode_keyboard()
     )
@@ -911,13 +911,14 @@ def process_nano_photo_plus_prompt(message):
     model = data["image_model"]
     model_name = IMAGE_MODELS.get(model, model)
     cost = get_image_cost(model, "photo_plus_prompt")
-    total_tokens = data["free_tokens"] + data["paid_tokens"]
+    total_tokens = get_total_tokens(user_id)
 
     if total_tokens < cost:
         bot.send_message(
             message.chat.id,
-            f"❌ Недостаточно {TOKEN_EMOJI} для *{model_name}*.\n\n"
-            f"Стоимость редактирования: *{cost}* {TOKEN_EMOJI}",
+            f"❌ Недостаточно токенов для *{model_name}*.\n\n"
+            f"Стоимость редактирования: *{cost}* {TOKEN_EMOJI}\n"
+            f"🍼 Баланс: *{total_tokens}* токенов",
             reply_markup=get_image_mode_keyboard()
         )
         return
@@ -969,7 +970,8 @@ def process_nano_photo_plus_prompt(message):
         safe_edit_message(
             message.chat.id,
             wait_msg.message_id,
-            f"❌ Не удалось списать {TOKEN_EMOJI} после обработки.",
+            f"❌ Не удалось списать токены после обработки.\n\n"
+            f"🍼 Баланс: *{get_total_tokens(user_id)}* токенов",
             reply_markup=get_image_mode_keyboard()
         )
         return
@@ -984,15 +986,14 @@ def process_nano_photo_plus_prompt(message):
         )
         return
 
-    updated = get_user_data(user_id)
-    total_left = updated["free_tokens"] + updated["paid_tokens"]
+    total_left = get_total_tokens(user_id)
 
     safe_edit_message(
         message.chat.id,
         wait_msg.message_id,
         f"✅ Изображение готово.\n"
         f"💸 Списано: *{charged}* {TOKEN_EMOJI}\n"
-        f"📦 Осталось: *{total_left}* {TOKEN_EMOJI}\n\n"
+        f"🍼 Баланс: *{total_left}* токенов\n\n"
         f"Ниже отправляю превью и оригинал файлом.",
         reply_markup=get_image_mode_keyboard()
     )
@@ -1038,28 +1039,31 @@ def cmd_start(message):
 @bot.message_handler(commands=["restart"])
 def cmd_restart(message):
     reset_free_tokens(message.from_user.id)
+    total_tokens = get_total_tokens(message.from_user.id)
+
     bot.send_message(
         message.chat.id,
-        f"🔄 Бесплатные {TOKEN_EMOJI} сброшены до *{FREE_TOKENS}*.\n"
-        f"Платные {TOKEN_EMOJI} не изменены.",
+        f"🔄 Баланс обновлен.\n\n"
+        f"🍼 Сейчас доступно: *{total_tokens}* токенов",
         reply_markup=get_main_keyboard()
     )
 
 
-@bot.message_handler(func=lambda m: m.text == "🔄 Сброс")
+@bot.message_handler(func=lambda m: m.text == BTN_RESET)
 def btn_restart(message):
     reset_free_tokens(message.from_user.id)
     current_keyboard = get_image_mode_keyboard() if get_user_data(message.from_user.id)["image_mode"] else get_main_keyboard()
+    total_tokens = get_total_tokens(message.from_user.id)
 
     bot.send_message(
         message.chat.id,
-        f"🔄 Бесплатные {TOKEN_EMOJI} сброшены до *{FREE_TOKENS}*.\n"
-        f"Платные {TOKEN_EMOJI} сохранены.",
+        f"🔄 Баланс обновлен.\n\n"
+        f"🍼 Сейчас доступно: *{total_tokens}* токенов",
         reply_markup=current_keyboard
     )
 
 
-@bot.message_handler(func=lambda m: m.text == "📊 Баланс")
+@bot.message_handler(func=lambda m: m.text == BTN_BALANCE)
 def btn_balance(message):
     current_keyboard = get_image_mode_keyboard() if get_user_data(message.from_user.id)["image_mode"] else get_main_keyboard()
 
@@ -1070,7 +1074,7 @@ def btn_balance(message):
     )
 
 
-@bot.message_handler(func=lambda m: m.text == "🧠 GPT/Gemini/Claude")
+@bot.message_handler(func=lambda m: m.text == BTN_AI)
 def btn_text_models(message):
     clear_image_state(message.from_user.id)
 
@@ -1082,7 +1086,8 @@ def btn_text_models(message):
         message.chat.id,
         f"🧠 *Текстовый режим*\n\n"
         f"Текущая модель: *{current_name}*\n"
-        f"Стоимость запроса: *{current_cost}* {TOKEN_EMOJI}\n\n"
+        f"Стоимость запроса: *{current_cost}* {TOKEN_EMOJI}\n"
+        f"🍼 Баланс: *{get_total_tokens(message.from_user.id)}* токенов\n\n"
         f"Выбери модель ниже, а потом просто напиши вопрос одним сообщением.",
         reply_markup=get_models_keyboard()
     )
@@ -1094,7 +1099,7 @@ def btn_text_models(message):
     )
 
 
-@bot.message_handler(func=lambda m: m.text == "🍌 Nano Banana")
+@bot.message_handler(func=lambda m: m.text == BTN_NANO)
 def btn_nano_banana(message):
     set_image_mode(message.from_user.id, True)
     set_image_model(message.from_user.id, DEFAULT_IMAGE_MODEL)
@@ -1109,7 +1114,8 @@ def btn_nano_banana(message):
         f"🍌 *Nano Banana*\n\n"
         f"Модель: *{current_image_name}*\n"
         f"Генерация по запросу: *{PROMPT_ONLY_COSTS.get(data['image_model'], 1)}* {TOKEN_EMOJI}\n"
-        f"Редактирование фото: *{PHOTO_PROMPT_COSTS.get(data['image_model'], 1)}* {TOKEN_EMOJI}\n\n"
+        f"Редактирование фото: *{PHOTO_PROMPT_COSTS.get(data['image_model'], 1)}* {TOKEN_EMOJI}\n"
+        f"🍼 Баланс: *{get_total_tokens(message.from_user.id)}* токенов\n\n"
         f"Выбери нужный режим:",
         reply_markup=get_image_mode_keyboard()
     )
@@ -1121,7 +1127,7 @@ def btn_nano_banana(message):
     )
 
 
-@bot.message_handler(func=lambda m: m.text == "❌ Выйти из режима")
+@bot.message_handler(func=lambda m: m.text == BTN_EXIT)
 def btn_exit_mode(message):
     clear_image_state(message.from_user.id)
     bot.send_message(
@@ -1131,13 +1137,15 @@ def btn_exit_mode(message):
     )
 
 
-@bot.message_handler(func=lambda m: m.text == "💳 Пополнение")
+@bot.message_handler(func=lambda m: m.text == BTN_TOPUP)
 def btn_payments(message):
     current_keyboard = get_image_mode_keyboard() if get_user_data(message.from_user.id)["image_mode"] else get_main_keyboard()
+    total_tokens = get_total_tokens(message.from_user.id)
 
     bot.send_message(
         message.chat.id,
-        "Выбери пакет пополнения:",
+        f"🍼 Текущий баланс: *{total_tokens}* токенов\n\n"
+        f"Выбери пакет пополнения:",
         reply_markup=get_payments_keyboard()
     )
 
@@ -1161,13 +1169,15 @@ def callback_model(call):
 
     model_name = TEXT_MODELS[model]
     model_cost = TEXT_MODEL_COSTS.get(model, 1)
+    total_tokens = get_total_tokens(call.from_user.id)
 
     bot.answer_callback_query(call.id, f"Выбрана {model_name}")
     safe_edit_message(
         call.message.chat.id,
         call.message.message_id,
         f"✅ Текстовая модель изменена на *{model_name}*\n"
-        f"Стоимость запроса: *{model_cost}* {TOKEN_EMOJI}\n\n"
+        f"Стоимость запроса: *{model_cost}* {TOKEN_EMOJI}\n"
+        f"🍼 Баланс: *{total_tokens}* токенов\n\n"
         f"Теперь просто отправь вопрос следующим сообщением.",
         reply_markup=None
     )
@@ -1180,6 +1190,7 @@ def callback_image_flow(call):
     data = get_user_data(user_id)
     model = data["image_model"]
     model_name = IMAGE_MODELS.get(model, model)
+    total_tokens = get_total_tokens(user_id)
 
     if flow not in {"prompt_only", "photo_plus_prompt"}:
         bot.answer_callback_query(call.id, "Неизвестный режим")
@@ -1198,7 +1209,8 @@ def callback_image_flow(call):
             call.message.message_id,
             f"🍌 *{model_name}*\n"
             f"Режим: *Генерация по запросу (Текст)*\n"
-            f"Стоимость: *{cost}* {TOKEN_EMOJI}\n\n"
+            f"Стоимость: *{cost}* {TOKEN_EMOJI}\n"
+            f"🍼 Баланс: *{total_tokens}* токенов\n\n"
             f"Теперь напиши текстовый запрос одним сообщением.",
             reply_markup=None
         )
@@ -1209,7 +1221,8 @@ def callback_image_flow(call):
             call.message.message_id,
             f"🍌 *{model_name}*\n"
             f"Режим: *Редактирование фото (Фото+Текст)*\n"
-            f"Стоимость: *{cost}* {TOKEN_EMOJI}\n\n"
+            f"Стоимость: *{cost}* {TOKEN_EMOJI}\n"
+            f"🍼 Баланс: *{total_tokens}* токенов\n\n"
             f"Теперь отправь фото с подписью, что нужно изменить.",
             reply_markup=None
         )
@@ -1232,6 +1245,7 @@ def callback_payplan(call):
             call.message.chat.id,
             f"💳 Ты выбрал пакет:\n\n"
             f"*{plan['label']}* — *{plan['amount']} ₽*\n\n"
+            f"🍼 После пополнения баланс увеличится на *{plan['tokens']}* токенов.\n"
             f"ЮKassa пока не подключена.\n"
             f"Скоро здесь появится ссылка на оплату.",
             reply_markup=current_keyboard
@@ -1253,9 +1267,10 @@ def callback_payplan(call):
     bot.send_message(
         call.message.chat.id,
         f"💳 Пакет: *{plan['label']}*\n"
-        f"💵 Стоимость: *{plan['amount']} ₽*\n\n"
+        f"💵 Стоимость: *{plan['amount']} ₽*\n"
+        f"🍼 Начисление: *{plan['tokens']}* токенов\n\n"
         f"Перейди по ссылке для оплаты:\n{confirmation_url}\n\n"
-        f"После успешной оплаты {TOKEN_EMOJI} начислятся автоматически.",
+        f"После успешной оплаты токены начислятся автоматически.",
         reply_markup=current_keyboard,
         disable_web_page_preview=True
     )
@@ -1289,12 +1304,12 @@ def handle_text(message):
     text = (message.text or "").strip()
 
     ignored_buttons = {
-        "🧠 GPT/Gemini/Claude",
-        "🍌 Nano Banana",
-        "📊 Баланс",
-        "💳 Пополнение",
-        "🔄 Сброс",
-        "❌ Выйти из режима"
+        BTN_AI,
+        BTN_NANO,
+        BTN_BALANCE,
+        BTN_TOPUP,
+        BTN_RESET,
+        BTN_EXIT
     }
 
     if text in ignored_buttons:
