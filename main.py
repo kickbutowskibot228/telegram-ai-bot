@@ -510,10 +510,26 @@ def get_models_keyboard():
     return kb
 
 
-def get_nano_actions_keyboard():
+def get_nano_actions_keyboard(user_id: int):
+    data = get_user_data(user_id)
+    image_model = data["image_model"]
+
+    prompt_cost = PROMPT_ONLY_COSTS.get(image_model, 1)
+    photo_cost = PHOTO_PROMPT_COSTS.get(image_model, 1)
+
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("Генерация по запросу (Текст)", callback_data="imgflow:prompt_only"))
-    kb.add(types.InlineKeyboardButton("Редактирование фото (Фото+Текст)", callback_data="imgflow:photo_plus_prompt"))
+    kb.add(
+        types.InlineKeyboardButton(
+            f"Генерация по текстовому запросу ({prompt_cost} {TOKEN_EMOJI})",
+            callback_data="imgflow:prompt_only"
+        )
+    )
+    kb.add(
+        types.InlineKeyboardButton(
+            f"Редактирование фото ({photo_cost} {TOKEN_EMOJI})",
+            callback_data="imgflow:photo_plus_prompt"
+        )
+    )
     return kb
 
 
@@ -1266,24 +1282,16 @@ def btn_nano_banana(message):
     set_image_flow(message.from_user.id, "")
     set_pending_image_prompt(message.from_user.id, "")
 
-    data = get_user_data(message.from_user.id)
-    current_image_name = IMAGE_MODELS.get(data["image_model"], data["image_model"])
-
     bot.send_message(
         message.chat.id,
-        f"🍌 *Nano Banana*\n\n"
-        f"Модель: *{current_image_name}*\n"
-        f"Генерация по запросу: *{PROMPT_ONLY_COSTS.get(data['image_model'], 1)}* {TOKEN_EMOJI}\n"
-        f"Редактирование фото: *{PHOTO_PROMPT_COSTS.get(data['image_model'], 1)}* {TOKEN_EMOJI}\n"
-        f"{balance_line(message.from_user.id)}\n\n"
-        f"Выбери нужный режим:",
+        "🍌 Режим Nano Banana включен.",
         reply_markup=get_image_mode_keyboard()
     )
 
     bot.send_message(
         message.chat.id,
         "Доступные действия:",
-        reply_markup=get_nano_actions_keyboard()
+        reply_markup=get_nano_actions_keyboard(message.from_user.id)
     )
 
 
@@ -1347,7 +1355,6 @@ def callback_image_flow(call):
     user_id = call.from_user.id
     data = get_user_data(user_id)
     model = data["image_model"]
-    model_name = IMAGE_MODELS.get(model, model)
 
     if flow not in {"prompt_only", "photo_plus_prompt"}:
         bot.answer_callback_query(call.id, "Неизвестный режим")
@@ -1359,28 +1366,26 @@ def callback_image_flow(call):
 
     bot.answer_callback_query(call.id, "Режим выбран")
 
+    cost = get_image_cost(model, flow)
+
     if flow == "prompt_only":
-        cost = get_image_cost(model, flow)
         safe_edit_message(
             call.message.chat.id,
             call.message.message_id,
-            f"🍌 *{model_name}*\n"
-            f"Режим: *Генерация по запросу (Текст)*\n"
+            f"🍌 *Генерация по тексту*\n"
             f"Стоимость: *{cost}* {TOKEN_EMOJI}\n"
             f"{balance_line(user_id)}\n\n"
-            f"Теперь напиши текстовый запрос одним сообщением.",
+            f"Отправь текстовый запрос одним сообщением.",
             reply_markup=None
         )
     else:
-        cost = get_image_cost(model, flow)
         safe_edit_message(
             call.message.chat.id,
             call.message.message_id,
-            f"🍌 *{model_name}*\n"
-            f"Режим: *Редактирование фото (Фото+Текст)*\n"
+            f"🍌 *Редактирование фото*\n"
             f"Стоимость: *{cost}* {TOKEN_EMOJI}\n"
             f"{balance_line(user_id)}\n\n"
-            f"Теперь отправь фото с подписью, что нужно изменить.",
+            f"Отправь фото с подписью, что нужно изменить.",
             reply_markup=None
         )
 
