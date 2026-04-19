@@ -549,16 +549,23 @@ def format_balance_text(user_id: int):
 
 def safe_edit_message(chat_id, message_id, text, reply_markup=None):
     try:
+        inline_markup = reply_markup if isinstance(reply_markup, types.InlineKeyboardMarkup) else None
+
         bot.edit_message_text(
             text=text,
             chat_id=chat_id,
             message_id=message_id,
             parse_mode="Markdown",
-            reply_markup=reply_markup
+            reply_markup=inline_markup
         )
     except Exception as e:
         logger.warning("Не удалось отредактировать сообщение: %s", e)
-        bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode="Markdown")
+        bot.send_message(
+            chat_id,
+            text,
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
 
 
 def get_image_cost(model: str, flow: str):
@@ -844,25 +851,34 @@ def process_text_question(message):
 
     success, source, charged = consume_tokens(user_id, model_cost)
     if not success:
-        bot.edit_message_text(
-            f"❌ Не удалось списать токены. Попробуй ещё раз.\n\n{balance_line(user_id)}",
+        safe_edit_message(
             message.chat.id,
             msg.message_id,
-            parse_mode="Markdown",
+            f"❌ Не удалось списать токены. Попробуй ещё раз.\n\n{balance_line(user_id)}",
+            reply_markup=None
+        )
+        bot.send_message(
+            message.chat.id,
+            "Выбери действие:",
             reply_markup=get_main_keyboard()
         )
         return
 
     total_left = get_total_tokens(user_id)
 
-    bot.edit_message_text(
+    safe_edit_message(
+        message.chat.id,
+        msg.message_id,
         f"🤖 *{model_name}*\n\n"
         f"{answer}\n\n"
         f"💸 Списано: *{charged}* {TOKEN_EMOJI}\n"
         f"💰 Твой баланс: *{total_left}* {TOKEN_EMOJI}",
+        reply_markup=None
+    )
+
+    bot.send_message(
         message.chat.id,
-        msg.message_id,
-        parse_mode="Markdown",
+        "Можешь отправить следующий вопрос.",
         reply_markup=get_main_keyboard()
     )
 
@@ -907,6 +923,11 @@ def process_nano_prompt_only(message):
             message.chat.id,
             wait_msg.message_id,
             result["error"],
+            reply_markup=None
+        )
+        bot.send_message(
+            message.chat.id,
+            "Доступные действия:",
             reply_markup=get_image_mode_keyboard()
         )
         return
@@ -917,6 +938,11 @@ def process_nano_prompt_only(message):
             message.chat.id,
             wait_msg.message_id,
             f"❌ Не удалось списать токены после генерации.\n\n{balance_line(user_id)}",
+            reply_markup=None
+        )
+        bot.send_message(
+            message.chat.id,
+            "Доступные действия:",
             reply_markup=get_image_mode_keyboard()
         )
         return
@@ -927,6 +953,11 @@ def process_nano_prompt_only(message):
             message.chat.id,
             wait_msg.message_id,
             "❌ Не удалось сохранить сгенерированное изображение.",
+            reply_markup=None
+        )
+        bot.send_message(
+            message.chat.id,
+            "Доступные действия:",
             reply_markup=get_image_mode_keyboard()
         )
         return
@@ -940,6 +971,12 @@ def process_nano_prompt_only(message):
         f"💸 Списано: *{charged}* {TOKEN_EMOJI}\n"
         f"💰 Твой баланс: *{total_left}* {TOKEN_EMOJI}\n\n"
         f"Ниже отправляю превью и оригинал файлом.",
+        reply_markup=None
+    )
+
+    bot.send_message(
+        message.chat.id,
+        "Доступные действия:",
         reply_markup=get_image_mode_keyboard()
     )
 
@@ -992,6 +1029,11 @@ def process_nano_photo_plus_prompt(message):
             message.chat.id,
             wait_msg.message_id,
             "❌ Не удалось скачать фото из Telegram.",
+            reply_markup=None
+        )
+        bot.send_message(
+            message.chat.id,
+            "Доступные действия:",
             reply_markup=get_image_mode_keyboard()
         )
         return
@@ -1007,6 +1049,11 @@ def process_nano_photo_plus_prompt(message):
             message.chat.id,
             wait_msg.message_id,
             result["error"],
+            reply_markup=None
+        )
+        bot.send_message(
+            message.chat.id,
+            "Доступные действия:",
             reply_markup=get_image_mode_keyboard()
         )
         return
@@ -1017,6 +1064,11 @@ def process_nano_photo_plus_prompt(message):
             message.chat.id,
             wait_msg.message_id,
             f"❌ Не удалось списать токены после обработки.\n\n{balance_line(user_id)}",
+            reply_markup=None
+        )
+        bot.send_message(
+            message.chat.id,
+            "Доступные действия:",
             reply_markup=get_image_mode_keyboard()
         )
         return
@@ -1027,6 +1079,11 @@ def process_nano_photo_plus_prompt(message):
             message.chat.id,
             wait_msg.message_id,
             "❌ Не удалось сохранить обработанное изображение.",
+            reply_markup=None
+        )
+        bot.send_message(
+            message.chat.id,
+            "Доступные действия:",
             reply_markup=get_image_mode_keyboard()
         )
         return
@@ -1040,6 +1097,12 @@ def process_nano_photo_plus_prompt(message):
         f"💸 Списано: *{charged}* {TOKEN_EMOJI}\n"
         f"💰 Твой баланс: *{total_left}* {TOKEN_EMOJI}\n\n"
         f"Ниже отправляю превью и оригинал файлом.",
+        reply_markup=None
+    )
+
+    bot.send_message(
+        message.chat.id,
+        "Доступные действия:",
         reply_markup=get_image_mode_keyboard()
     )
 
@@ -1318,33 +1381,35 @@ def btn_payments(message):
 
     bot.send_message(
         message.chat.id,
-        f"После выбора пакета откроется ссылка на оплату {TOKEN_EMOJI}.",
+        f"После выбора пакета откроется ссылка на оплату через YooKassa.\n"
+        f"После успешной оплаты токены будут автоматически начислены.",
         reply_markup=current_keyboard
     )
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("model:"))
 def callback_model(call):
-    model = call.data.split("model:", 1)[1]
+    model_id = call.data.split("model:", 1)[1]
+    user_id = call.from_user.id
 
-    if model not in TEXT_MODELS:
+    if model_id not in TEXT_MODELS:
         bot.answer_callback_query(call.id, "Неизвестная модель")
         return
 
-    clear_image_state(call.from_user.id)
-    set_user_model(call.from_user.id, model)
+    set_user_model(user_id, model_id)
+    model_name = TEXT_MODELS[model_id]
+    cost = TEXT_MODEL_COSTS.get(model_id, 1)
 
-    model_name = TEXT_MODELS[model]
-    model_cost = TEXT_MODEL_COSTS.get(model, 1)
+    bot.answer_callback_query(call.id, f"Модель установлена: {model_name}")
 
-    bot.answer_callback_query(call.id, f"Выбрана {model_name}")
     safe_edit_message(
         call.message.chat.id,
         call.message.message_id,
-        f"✅ Текстовая модель изменена на *{model_name}*\n"
-        f"Стоимость запроса: *{model_cost}* {TOKEN_EMOJI}\n"
-        f"{balance_line(call.from_user.id)}\n\n"
-        f"Теперь просто отправь вопрос следующим сообщением.",
+        f"🧠 *Текстовый режим*\n\n"
+        f"Текущая модель: *{model_name}*\n"
+        f"Стоимость запроса: *{cost}* {TOKEN_EMOJI}\n"
+        f"{balance_line(user_id)}\n\n"
+        f"Теперь просто отправь сообщение с вопросом.",
         reply_markup=None
     )
 
@@ -1393,48 +1458,40 @@ def callback_image_flow(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("payplan:"))
 def callback_payplan(call):
     plan_key = call.data.split("payplan:", 1)[1]
+    user_id = call.from_user.id
 
     if plan_key not in PAY_PLANS:
         bot.answer_callback_query(call.id, "Неизвестный пакет")
         return
 
-    plan = PAY_PLANS[plan_key]
-    current_keyboard = get_image_mode_keyboard() if get_user_data(call.from_user.id)["image_mode"] else get_main_keyboard()
+    bot.answer_callback_query(call.id, "Создаю ссылку на оплату...")
 
-    if not YOOKASSA_ENABLED:
-        bot.answer_callback_query(call.id, "Пакет выбран")
-        bot.send_message(
-            call.message.chat.id,
-            f"💳 Ты выбрал пакет:\n\n"
-            f"*{plan['label']}* — *{plan['amount']} ₽*\n\n"
-            f"🍼 После пополнения баланс увеличится на *{plan['tokens']}* токенов.\n"
-            f"ЮKassa пока не подключена.\n"
-            f"Скоро здесь появится ссылка на оплату.",
-            reply_markup=current_keyboard
-        )
-        return
-
-    payment_id, confirmation_url = create_yookassa_payment(call.from_user.id, plan_key)
+    payment_id, confirmation_url = create_yookassa_payment(user_id, plan_key)
 
     if not payment_id or not confirmation_url:
-        bot.answer_callback_query(call.id, "Ошибка создания платежа")
-        bot.send_message(
+        safe_edit_message(
             call.message.chat.id,
-            "❌ Не удалось создать платеж. Попробуй позже.",
-            reply_markup=current_keyboard
+            call.message.message_id,
+            "❌ Не удалось создать ссылку на оплату. Попробуй позже.",
+            reply_markup=None
         )
         return
 
-    bot.answer_callback_query(call.id)
+    safe_edit_message(
+        call.message.chat.id,
+        call.message.message_id,
+        f"💳 Пакет: *{PAY_PLANS[plan_key]['label']}*\n"
+        f"Сумма: *{PAY_PLANS[plan_key]['amount']} ₽*\n\n"
+        f"Нажми на кнопку ниже, чтобы перейти к оплате.",
+        reply_markup=None
+    )
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("💳 Оплатить", url=confirmation_url))
     bot.send_message(
         call.message.chat.id,
-        f"💳 Пакет: *{plan['label']}*\n"
-        f"💵 Стоимость: *{plan['amount']} ₽*\n"
-        f"🍼 Начисление: *{plan['tokens']}* токенов\n\n"
-        f"Перейди по ссылке для оплаты:\n{confirmation_url}\n\n"
-        f"После успешной оплаты токены начислятся автоматически.",
-        reply_markup=current_keyboard,
-        disable_web_page_preview=True
+        "Ссылка на оплату:",
+        reply_markup=kb
     )
 
 
@@ -1445,129 +1502,77 @@ def handle_photo(message):
     if not data["image_mode"]:
         bot.send_message(
             message.chat.id,
-            "Если хочешь работать с изображениями, сначала нажми *🍌 Nano Banana*.",
+            "Сначала включи режим Nano Banana кнопкой 🍌 Nano Banana.",
             reply_markup=get_main_keyboard()
         )
         return
 
-    if data["image_flow"] == "photo_plus_prompt":
-        process_nano_photo_plus_prompt(message)
-        return
-
-    bot.send_message(
-        message.chat.id,
-        "Сейчас выбран другой режим.\nЕсли хочешь редактирование, выбери *Редактирование фото (Фото+Текст)*.",
-        reply_markup=get_image_mode_keyboard()
-    )
-
-
-@bot.message_handler(content_types=["text"])
-def handle_text(message):
-    text = (message.text or "").strip()
-
-    ignored_buttons = {
-        BTN_AI, BTN_NANO, BTN_BALANCE, BTN_TOPUP, BTN_RESET, BTN_EXIT
-    }
-
-    if text in ignored_buttons:
-        return
-
-    data = get_user_data(message.from_user.id)
-
-    if data["image_mode"] and data["image_flow"] == "prompt_only":
-        process_nano_prompt_only(message)
-        return
-
-    if data["image_mode"] and data["image_flow"] == "photo_plus_prompt":
+    if data["image_flow"] != "photo_plus_prompt":
         bot.send_message(
             message.chat.id,
-            "🖼 Сейчас включен режим *Редактирование фото (Фото+Текст)*.\nОтправь фото с подписью.",
+            "Сейчас выбран режим генерации по тексту.\n"
+            "Для редактирования фото выбери соответствующую кнопку Nano Banana.",
             reply_markup=get_image_mode_keyboard()
         )
         return
 
+    process_nano_photo_plus_prompt(message)
+
+
+@bot.message_handler(content_types=["text"])
+def handle_text(message):
+    if message.text.startswith("/"):
+        return
+
+    user_id = message.from_user.id
+    user_data = get_user_data(user_id)
+
+    # если в режиме Nano Banana
+    if user_data["image_mode"]:
+        if user_data["image_flow"] == "prompt_only":
+            process_nano_prompt_only(message)
+            return
+        elif user_data["image_flow"] == "photo_plus_prompt":
+            bot.send_message(
+                message.chat.id,
+                "Сейчас выбран режим редактирования фото.\n"
+                "Отправь фото с подписью, что нужно изменить.",
+                reply_markup=get_image_mode_keyboard()
+            )
+            return
+
+    # обычный текстовый режим
     process_text_question(message)
 
 
-@app.route("/", methods=["GET"])
-def home():
-    return {
-        "status": "ok",
-        "service": "telegram-bot",
-        "telegram_webhook": True,
-        "yookassa_enabled": YOOKASSA_ENABLED
-    }, 200
-
-
-@app.route("/health", methods=["GET"])
-def health():
-    return "OK", 200
-
-
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
-def telegram_webhook():
-    if "application/json" not in (request.headers.get("content-type") or ""):
+def webhook():
+    if request.headers.get("content-type") == "application/json":
+        json_str = request.get_data().decode("utf-8")
+        update = telebot.types.Update.de_json(json_str)
+        bot.process_new_updates([update])
+        return ""
+    else:
         abort(403)
 
-    json_string = request.get_data().decode("utf-8")
-    update = telebot.types.Update.de_json(json_string)
-    bot.process_new_updates([update])
-    return "OK", 200
+
+@app.route("/", methods=["GET"])
+def index():
+    return "Bot is running"
 
 
-@app.route("/yookassa/webhook", methods=["POST"])
-def yookassa_webhook():
-    if not YOOKASSA_ENABLED:
-        return "disabled", 200
-
-    data = request.get_json(silent=True)
-
-    if not data:
-        logger.warning("Пустой webhook от YooKassa")
-        return "bad request", 400
-
-    event = data.get("event")
-    obj = data.get("object", {})
-    payment_id = obj.get("id")
-
-    logger.info("YooKassa webhook event=%s payment_id=%s", event, payment_id)
-
-    if event == "payment.succeeded" and payment_id:
-        apply_payment_if_needed(payment_id)
-        return "ok", 200
-
-    if event == "payment.canceled" and payment_id:
-        update_payment_status(payment_id, "canceled")
-        return "ok", 200
-
-    return "ok", 200
-
-
-def setup_telegram_webhook():
-    if not RENDER_EXTERNAL_HOSTNAME:
-        logger.warning("RENDER_EXTERNAL_HOSTNAME не найден, Telegram webhook не установлен")
-        return
-
-    webhook_url = f"https://{RENDER_EXTERNAL_HOSTNAME}/{TELEGRAM_TOKEN}"
-
-    try:
+def setup_webhook():
+    if RENDER_EXTERNAL_HOSTNAME:
+        webhook_url = f"https://{RENDER_EXTERNAL_HOSTNAME}/{TELEGRAM_TOKEN}"
         bot.remove_webhook()
         time.sleep(1)
-        success = bot.set_webhook(url=webhook_url)
+        bot.set_webhook(url=webhook_url)
+        logger.info("Webhook установлен: %s", webhook_url)
+    else:
+        logger.warning("RENDER_EXTERNAL_HOSTNAME не задан, webhook не будет установлен")
 
-        if success:
-            logger.info("Telegram webhook установлен: %s", webhook_url)
-        else:
-            logger.error("Не удалось установить Telegram webhook: %s", webhook_url)
-
-    except Exception as e:
-        logger.exception("Ошибка установки Telegram webhook: %s", e)
-
-
-init_db()
-setup_telegram_webhook()
 
 if __name__ == "__main__":
-    logger.info("🚀 Bot started on port %s", PORT)
-    logger.info("YooKassa enabled: %s", YOOKASSA_ENABLED)
-    app.run(host="0.0.0.0", port=PORT, debug=False)
+    init_db()
+    setup_webhook()
+    app.run(host="0.0.0.0", port=PORT)
