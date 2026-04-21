@@ -1133,7 +1133,7 @@ def submit_openrouter_video_generation(
             {
                 "type": "image_url",
                 "image_url": {"url": input_image_data_url},
-                "frame": "first"
+                "frame_type": "first_frame"
             }
         ]
 
@@ -1190,6 +1190,36 @@ def poll_openrouter_video(polling_url: str):
     except Exception as e:
         logger.exception("Ошибка polling video generation: %s", e)
         return {"ok": False, "error": "Ошибка polling статуса видео."}
+
+def download_openrouter_video_content(generation_id: str, index: int = 0, prefix: str = "kling"):
+    filename = f"{prefix}_{int(time.time())}_{uuid.uuid4().hex[:8]}.mp4"
+    file_path = os.path.join(GENERATED_VIDEOS_DIR, filename)
+    url = f"https://openrouter.ai/api/v1/videos/{generation_id}/content?index={index}"
+
+    try:
+        resp = requests.get(
+            url,
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}"
+            },
+            timeout=300,
+            stream=True
+        )
+
+        if resp.status_code != 200:
+            logger.error("OpenRouter content download error %s: %s", resp.status_code, resp.text[:500])
+            return None
+
+        with open(file_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+
+        return file_path
+
+    except Exception as e:
+        logger.exception("Ошибка скачивания видео через content endpoint: %s", e)
+        return None
 
 def download_video_file(video_url: str, prefix: str = "kling"):
     filename = f"{prefix}_{int(time.time())}_{uuid.uuid4().hex[:8]}.mp4"
@@ -1631,7 +1661,7 @@ def process_video_prompt(message):
     if flow != "prompt_only":
         bot.send_message(
             message.chat.id,
-            "Сейчас выбран режим *по фото + описание*.\n"
+            "Сейчас у тебя выбран режим *по фото + описание*.\n\n"
             "Отправь фото с подписью, что нужно сгенерировать.",
             parse_mode="Markdown",
             reply_markup=get_video_mode_keyboard()
@@ -1642,7 +1672,7 @@ def process_video_prompt(message):
     if not prompt_text:
         bot.send_message(
             message.chat.id,
-            "Напиши текстовый промт для генерации видео.",
+            "Напиши текстовый запрос одним сообщением.",
             reply_markup=get_video_mode_keyboard()
         )
         return
@@ -1662,10 +1692,9 @@ def process_video_prompt(message):
     wait_msg = bot.send_message(
         message.chat.id,
         f"🎬 Запускаю генерацию видео через *{model_name}*...\n"
-        f"Режим: *по тексту*\n"
-        f"Длительность: *{duration}с*\n"
-        f"Формат: *{aspect_ratio}*\n\n"
-        f"Это может занять некоторое время.",
+        f"⏱ Длительность: *{duration}с*\n"
+        f"📐 Формат: *{aspect_ratio}*\n\n"
+        f"Обычно это занимает 1–5 минут.",
         parse_mode="Markdown"
     )
 
@@ -1686,7 +1715,7 @@ def process_video_prompt(message):
         )
         bot.send_message(
             message.chat.id,
-            "Попробуй ещё раз.",
+            "Попробуй ещё раз с другим запросом.",
             reply_markup=get_video_mode_keyboard()
         )
         return
@@ -1696,41 +1725,42 @@ def process_video_prompt(message):
         safe_edit_message(
             message.chat.id,
             wait_msg.message_id,
-            f"❌ Не удалось списать токены.\n\n{balance_line(user_id)}",
+            f"❌ Не удалось списать токены после запуска генерации.\n\n{balance_line(user_id)}",
             reply_markup=None
         )
         return
 
+    generation_id = submit_result.get("id")
+    polling_url = submit_result.get("polling_url")
+
     safe_edit_message(
         message.chat.id,
         wait_msg.message_id,
-        f"🎬 Видео поставлено в очередь.\n"
+        f"🎬 Генерация запущена.\n\n"
         f"💸 Списано: *{charged}* {TOKEN_EMOJI}\n"
-        f"Режим: *по тексту*\n"
-        f"Длительность: *{duration}с*\n"
-        f"Формат: *{aspect_ratio}*\n"
+        f"⏱ Длительность: *{duration}с*\n"
+        f"📐 Формат: *{aspect_ratio}*\n"
         f"{balance_line(user_id)}\n\n"
-        f"Ожидаю результат...",
+        f"⏳ Ожидаю готовое видео...",
         reply_markup=None
     )
 
-    polling_url = submit_result.get("polling_url")
-    if not polling_url:
+    if not generation_id or not polling_url:
         bot.send_message(
             message.chat.id,
-            "❌ OpenRouter не вернул polling_url.",
+            "❌ OpenRouter не вернул id или polling_url для видео.",
             reply_markup=get_video_mode_keyboard()
         )
         return
 
     for _ in range(VIDEO_POLL_MAX_ATTEMPTS):
         time.sleep(VIDEO_POLL_INTERVAL)
-        poll_result = poll_openrouter_video(polling_url)
 
+        poll_result = poll_openrouter_video(polling_url)
         if not poll_result["ok"]:
             continue
 
-        status = poll_result["status"]
+        status = poll_result.get("status")
 
         if status in ("pending", "in_progress"):
             continue
@@ -1738,22 +1768,14 @@ def process_video_prompt(message):
         if status == "failed":
             bot.send_message(
                 message.chat.id,
-                f"❌ Генерация видео завершилась ошибкой.\n{poll_result.get('error_message') or ''}",
+                f"❌ Генерация видео завершилась ошибкой.\n\n{poll_result.get('error_message') or 'Неизвестная ошибка.'}",
                 reply_markup=get_video_mode_keyboard()
             )
             return
 
         if status == "completed":
-            urls = poll_result.get("unsigned_urls", [])
-            if not urls:
-                bot.send_message(
-                    message.chat.id,
-                    "❌ Видео готово, но ссылка на файл не получена.",
-                    reply_markup=get_video_mode_keyboard()
-                )
-                return
+            file_path = download_openrouter_video_content(generation_id, index=0, prefix="kling_text")
 
-            file_path = download_video_file(urls[0], prefix="kling_text")
             if not file_path:
                 bot.send_message(
                     message.chat.id,
@@ -1766,7 +1788,7 @@ def process_video_prompt(message):
                 bot.send_video(
                     message.chat.id,
                     f,
-                    caption=f"🎬 *{model_name}*\nГотово.",
+                    caption=f"🎬 Видео готово\n\nМодель: *{model_name}*",
                     parse_mode="Markdown"
                 )
 
@@ -1774,19 +1796,19 @@ def process_video_prompt(message):
                 bot.send_document(
                     message.chat.id,
                     f,
-                    caption="📎 Оригинал видео файлом"
+                    caption="📎 Видео файлом"
                 )
 
             bot.send_message(
                 message.chat.id,
-                "Можешь отправить новый промт или изменить параметры генерации.",
+                "Готово. Можешь запустить следующую генерацию.",
                 reply_markup=get_video_mode_keyboard()
             )
             return
 
     bot.send_message(
         message.chat.id,
-        "⏳ Генерация выполняется слишком долго. Попробуй позже.",
+        "⏳ Видео пока не готово. Попробуй позже ещё раз.",
         reply_markup=get_video_mode_keyboard()
     )
 
@@ -1804,8 +1826,8 @@ def process_video_photo_plus_prompt(message):
     if flow != "photo_plus_prompt":
         bot.send_message(
             message.chat.id,
-            "Сейчас выбран режим *по тексту*.\n"
-            "Отправь обычное текстовое сообщение с промтом.",
+            "Сейчас у тебя выбран режим *по тексту*.\n\n"
+            "Отправь обычное текстовое сообщение с описанием видео.",
             parse_mode="Markdown",
             reply_markup=get_video_mode_keyboard()
         )
@@ -1815,7 +1837,7 @@ def process_video_photo_plus_prompt(message):
     if not prompt_text:
         bot.send_message(
             message.chat.id,
-            "🖼 Отправь фото *с подписью*, что нужно сгенерировать.",
+            "Отправь фото *с подписью*, что нужно сгенерировать.",
             parse_mode="Markdown",
             reply_markup=get_video_mode_keyboard()
         )
@@ -1836,26 +1858,25 @@ def process_video_photo_plus_prompt(message):
     wait_msg = bot.send_message(
         message.chat.id,
         f"🎬 Запускаю генерацию видео через *{model_name}*...\n"
-        f"Режим: *по фото + описание*\n"
-        f"Длительность: *{duration}с*\n"
-        f"Формат: *{aspect_ratio}*\n\n"
-        f"Это может занять некоторое время.",
+        f"⏱ Длительность: *{duration}с*\n"
+        f"📐 Формат: *{aspect_ratio}*\n\n"
+        f"Обычно это занимает 1–5 минут.",
         parse_mode="Markdown"
     )
 
     try:
         input_image_data_url = telegram_photo_to_data_url(message)
     except Exception as e:
-        logger.exception("Ошибка получения фото для Kling Video: %s", e)
+        logger.exception("Kling Video Telegram photo error: %s", e)
         safe_edit_message(
             message.chat.id,
             wait_msg.message_id,
-            "❌ Не удалось скачать фото из Telegram.",
+            "❌ Не удалось обработать фото из Telegram.",
             reply_markup=None
         )
         bot.send_message(
             message.chat.id,
-            "Попробуй снова.",
+            "Попробуй отправить фото ещё раз.",
             reply_markup=get_video_mode_keyboard()
         )
         return
@@ -1877,7 +1898,7 @@ def process_video_photo_plus_prompt(message):
         )
         bot.send_message(
             message.chat.id,
-            "Попробуй ещё раз.",
+            "Попробуй ещё раз с другим фото или описанием.",
             reply_markup=get_video_mode_keyboard()
         )
         return
@@ -1887,41 +1908,42 @@ def process_video_photo_plus_prompt(message):
         safe_edit_message(
             message.chat.id,
             wait_msg.message_id,
-            f"❌ Не удалось списать токены.\n\n{balance_line(user_id)}",
+            f"❌ Не удалось списать токены после запуска генерации.\n\n{balance_line(user_id)}",
             reply_markup=None
         )
         return
 
+    generation_id = submit_result.get("id")
+    polling_url = submit_result.get("polling_url")
+
     safe_edit_message(
         message.chat.id,
         wait_msg.message_id,
-        f"🎬 Видео поставлено в очередь.\n"
+        f"🎬 Генерация запущена.\n\n"
         f"💸 Списано: *{charged}* {TOKEN_EMOJI}\n"
-        f"Режим: *по фото + описание*\n"
-        f"Длительность: *{duration}с*\n"
-        f"Формат: *{aspect_ratio}*\n"
+        f"⏱ Длительность: *{duration}с*\n"
+        f"📐 Формат: *{aspect_ratio}*\n"
         f"{balance_line(user_id)}\n\n"
-        f"Ожидаю результат...",
+        f"⏳ Ожидаю готовое видео...",
         reply_markup=None
     )
 
-    polling_url = submit_result.get("polling_url")
-    if not polling_url:
+    if not generation_id or not polling_url:
         bot.send_message(
             message.chat.id,
-            "❌ OpenRouter не вернул polling_url.",
+            "❌ OpenRouter не вернул id или polling_url для видео.",
             reply_markup=get_video_mode_keyboard()
         )
         return
 
     for _ in range(VIDEO_POLL_MAX_ATTEMPTS):
         time.sleep(VIDEO_POLL_INTERVAL)
-        poll_result = poll_openrouter_video(polling_url)
 
+        poll_result = poll_openrouter_video(polling_url)
         if not poll_result["ok"]:
             continue
 
-        status = poll_result["status"]
+        status = poll_result.get("status")
 
         if status in ("pending", "in_progress"):
             continue
@@ -1929,22 +1951,14 @@ def process_video_photo_plus_prompt(message):
         if status == "failed":
             bot.send_message(
                 message.chat.id,
-                f"❌ Генерация видео завершилась ошибкой.\n{poll_result.get('error_message') or ''}",
+                f"❌ Генерация видео завершилась ошибкой.\n\n{poll_result.get('error_message') or 'Неизвестная ошибка.'}",
                 reply_markup=get_video_mode_keyboard()
             )
             return
 
         if status == "completed":
-            urls = poll_result.get("unsigned_urls", [])
-            if not urls:
-                bot.send_message(
-                    message.chat.id,
-                    "❌ Видео готово, но ссылка на файл не получена.",
-                    reply_markup=get_video_mode_keyboard()
-                )
-                return
+            file_path = download_openrouter_video_content(generation_id, index=0, prefix="kling_photo")
 
-            file_path = download_video_file(urls[0], prefix="kling_photo")
             if not file_path:
                 bot.send_message(
                     message.chat.id,
@@ -1957,7 +1971,7 @@ def process_video_photo_plus_prompt(message):
                 bot.send_video(
                     message.chat.id,
                     f,
-                    caption=f"🎬 *{model_name}*\nГотово.",
+                    caption=f"🎬 Видео готово\n\nМодель: *{model_name}*",
                     parse_mode="Markdown"
                 )
 
@@ -1965,19 +1979,19 @@ def process_video_photo_plus_prompt(message):
                 bot.send_document(
                     message.chat.id,
                     f,
-                    caption="📎 Оригинал видео файлом"
+                    caption="📎 Видео файлом"
                 )
 
             bot.send_message(
                 message.chat.id,
-                "Можешь отправить новое фото с подписью или изменить параметры генерации.",
+                "Готово. Можешь запустить следующую генерацию.",
                 reply_markup=get_video_mode_keyboard()
             )
             return
 
     bot.send_message(
         message.chat.id,
-        "⏳ Генерация выполняется слишком долго. Попробуй позже.",
+        "⏳ Видео пока не готово. Попробуй позже ещё раз.",
         reply_markup=get_video_mode_keyboard()
     )
 
