@@ -57,6 +57,8 @@ FREE_RESET_COOLDOWN_DAYS = 3
 TOKEN_EMOJI = "🍼"
 GENERATED_DIR = "generated_images"
 
+CHAT_HISTORY_LIMIT = 12
+
 os.makedirs(GENERATED_DIR, exist_ok=True)
 
 BTN_AI = "🧠 GPT/Gemini/Claude"
@@ -145,6 +147,16 @@ def init_db():
             amount INTEGER NOT NULL,
             tokens_count INTEGER NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS chat_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -365,6 +377,63 @@ def add_paid_tokens(user_id: int, tokens_count: int):
         "UPDATE users SET paid_tokens = paid_tokens + ? WHERE user_id = ?",
         (tokens_count, user_id)
     )
+    conn.commit()
+    conn.close()
+
+
+def add_chat_message(user_id: int, role: str, content: str):
+    ensure_user(user_id)
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT INTO chat_history (user_id, role, content)
+        VALUES (?, ?, ?)
+    """, (user_id, role, content))
+
+    conn.commit()
+    conn.close()
+
+
+def get_chat_history(user_id: int, limit: int = CHAT_HISTORY_LIMIT):
+    ensure_user(user_id)
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT role, content
+        FROM chat_history
+        WHERE user_id = ?
+        ORDER BY id DESC
+        LIMIT ?
+    """, (user_id, limit))
+
+    rows = cur.fetchall()
+    conn.close()
+
+    rows.reverse()
+
+    messages = []
+    for role, content in rows:
+        if role in ("user", "assistant") and content:
+            messages.append({
+                "role": role,
+                "content": content
+            })
+
+    return messages
+
+
+def clear_chat_history(user_id: int):
+    ensure_user(user_id)
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    cur.execute("DELETE FROM chat_history WHERE user_id = ?", (user_id,))
+
     conn.commit()
     conn.close()
 
@@ -695,16 +764,22 @@ def send_generated_image_both(chat_id: int, file_path: str, caption_preview: str
         bot.send_document(chat_id, document=f, caption=caption_file)
 
 
-def call_openrouter_text(model: str, message: str, max_retries: int = 3):
+def call_openrouter_text(model: str, user_message: str, history=None, max_retries: int = 3):
     url = "https://openrouter.ai/api/v1/chat/completions"
     fallback_model = DEFAULT_MODEL
 
+    messages = [
+        {"role": "system", "content": "Отвечай кратко, по делу, на русском языке."}
+    ]
+
+    if history:
+        messages.extend(history)
+
+    messages.append({"role": "user", "content": user_message})
+
     data = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": "Отвечай кратко, по делу, на русском языке."},
-            {"role": "user", "content": message}
-        ],
+        "messages": messages,
         "max_tokens": 500,
         "temperature": 0.7
     }
@@ -737,7 +812,7 @@ def call_openrouter_text(model: str, message: str, max_retries: int = 3):
                 time.sleep(2 ** attempt)
 
     if model != fallback_model:
-        return call_openrouter_text(fallback_model, message, max_retries=1) + " ⚡"
+        return call_openrouter_text(fallback_model, user_message, history=history, max_retries=1) + " ⚡"
 
     return "⚠️ Не удалось получить ответ от AI. Попробуй ещё раз позже."
 
@@ -899,6 +974,16 @@ def apply_payment_if_needed(payment_id: str):
 
 def process_text_question(message):
     user_id = message.from_user.id
+    user_text = (message.text or "").strip()
+
+    if not user_text:
+        bot.send_message(
+            message.chat.id,
+            "Напиши текстовый вопрос.",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
     user_data = get_user_data(user_id)
     model = user_data["model"]
 
@@ -924,7 +1009,8 @@ def process_text_question(message):
     msg = bot.send_message(message.chat.id, "🤖 Думаю... ⏳")
     bot.send_chat_action(message.chat.id, "typing")
 
-    answer = call_openrouter_text(model, message.text)
+    history = get_chat_history(user_id, limit=CHAT_HISTORY_LIMIT)
+    answer = call_openrouter_text(model, user_text, history=history)
 
     success, source, charged = consume_tokens(user_id, model_cost)
     if not success:
@@ -941,6 +1027,9 @@ def process_text_question(message):
         )
         return
 
+    add_chat_message(user_id, "user", user_text)
+    add_chat_message(user_id, "assistant", answer)
+
     total_left = get_total_tokens(user_id)
 
     safe_edit_message(
@@ -949,13 +1038,13 @@ def process_text_question(message):
         f"🤖 *{model_name}*\n\n"
         f"{answer}\n\n"
         f"💸 Списано: *{charged}* {TOKEN_EMOJI}\n"
-        f"💰 Твой баланс: *{total_left}* {TOKEN_EMOJI}",
+        f"💰 Твой баланс: *{total_left}* {TOKEN_EMОJI}",
         reply_markup=None
     )
 
     bot.send_message(
         message.chat.id,
-        "Можешь отправить следующий вопрос.",
+        "Можешь продолжать диалог — бот помнит последние сообщения.",
         reply_markup=get_main_keyboard()
     )
 
@@ -1194,6 +1283,8 @@ def process_nano_photo_plus_prompt(message):
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
     ensure_user(message.from_user.id)
+    clear_chat_history(message.from_user.id)
+
     payment_text = (
         f"💳 Пополнение {TOKEN_EMOJI} уже доступно."
         if YOOKASSA_ENABLED
@@ -1236,6 +1327,16 @@ def cmd_restart(message):
     bot.send_message(
         message.chat.id,
         f"🔄 Бесплатные токены восстановлены.\n\n{balance_line(user_id)}",
+        reply_markup=get_main_keyboard()
+    )
+
+
+@bot.message_handler(commands=["newchat"])
+def cmd_newchat(message):
+    clear_chat_history(message.from_user.id)
+    bot.send_message(
+        message.chat.id,
+        "🧹 История диалога очищена.\nТеперь начинаем новый разговор с чистого контекста.",
         reply_markup=get_main_keyboard()
     )
 
@@ -1294,8 +1395,6 @@ def cmd_user_info(message):
 
     model_name = TEXT_MODELS.get(info["model"], info["model"])
     image_model_name = IMAGE_MODELS.get(info["image_model"], info["image_model"])
-
-
 
     last_reset_text = info["last_free_reset_at"] if info["last_free_reset_at"] else "никогда"
 
@@ -1376,7 +1475,7 @@ def cmd_addtokens(message):
         bot.send_message(
             target_user_id,
             f"🎁 Администратор начислил тебе *{amount}* {TOKEN_EMOJI}\n"
-            f"💰 Твой баланс: *{total_tokens}* {TOKEN_EMOJI}",
+            f"💰 Твой баланс: *{total_tokens}* {TOKEN_EMОJI}",
             parse_mode="Markdown",
             reply_markup=get_main_keyboard()
         )
@@ -1506,6 +1605,8 @@ def callback_model(call):
         return
 
     set_user_model(user_id, model_id)
+    clear_chat_history(user_id)
+
     model_name = TEXT_MODELS[model_id]
     cost = TEXT_MODEL_COSTS.get(model_id, 1)
 
@@ -1518,7 +1619,7 @@ def callback_model(call):
         f"Текущая модель: *{model_name}*\n"
         f"Стоимость запроса: *{cost}* {TOKEN_EMOJI}\n"
         f"{balance_line(user_id)}\n\n"
-        f"Теперь просто отправь сообщение с вопросом.",
+        f"История диалога очищена для новой модели.\nТеперь просто отправь сообщение с вопросом.",
         reply_markup=None
     )
 
