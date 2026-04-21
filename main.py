@@ -61,8 +61,12 @@ CHAT_HISTORY_LIMIT = 12
 
 os.makedirs(GENERATED_DIR, exist_ok=True)
 
+GENERATED_VIDEOS_DIR = "generated_videos"
+os.makedirs(GENERATED_VIDEOS_DIR, exist_ok=True)
+
 BTN_AI = "🧠 GPT/Gemini/Claude"
 BTN_NANO = "🍌 Nano Banana"
+BTN_VIDEO = "🎬 Kling"
 BTN_BALANCE = "📊 Баланс"
 BTN_TOPUP = "💳 Пополнение"
 BTN_RESET = "🔄 Сброс"
@@ -97,6 +101,24 @@ PHOTO_PROMPT_COSTS = {
 DEFAULT_MODEL = "google/gemini-3-flash-preview"
 DEFAULT_IMAGE_MODEL = "google/gemini-3-pro-image-preview"
 
+VIDEO_MODELS = {
+    "kwaivgi/kling-video-o1": "🎬 Kling Video O1"
+}
+
+VIDEO_PROMPT_COSTS = {
+    "kwaivgi/kling-video-o1": {
+        5: 40,
+        10: 70
+    }
+}
+
+DEFAULT_VIDEO_MODEL = "kwaivgi/kling-video-o1"
+DEFAULT_VIDEO_DURATION = 5
+DEFAULT_VIDEO_ASPECT_RATIO = "16:9"
+
+VIDEO_POLL_INTERVAL = 10
+VIDEO_POLL_MAX_ATTEMPTS = 48
+
 PAY_PLANS = {
     "small": {"label": f"800 {TOKEN_EMOJI}", "amount": 250, "tokens": 800},
     "medium": {"label": f"1800 {TOKEN_EMOJI}", "amount": 400, "tokens": 1800},
@@ -108,7 +130,7 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
-    cur.execute("""
+        cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             model TEXT NOT NULL DEFAULT 'google/gemini-3-flash-preview',
@@ -118,7 +140,12 @@ def init_db():
             image_model TEXT NOT NULL DEFAULT 'google/gemini-3-pro-image-preview',
             image_flow TEXT DEFAULT '',
             pending_image_prompt TEXT DEFAULT '',
-            last_free_reset_at TEXT DEFAULT NULL
+            last_free_reset_at TEXT DEFAULT NULL,
+            video_mode INTEGER NOT NULL DEFAULT 0,
+            video_model TEXT NOT NULL DEFAULT 'kwaivgi/kling-video-o1',
+            video_flow TEXT DEFAULT '',
+            video_duration INTEGER NOT NULL DEFAULT 5,
+            video_aspect_ratio TEXT NOT NULL DEFAULT '16:9'
         )
     """)
 
@@ -136,6 +163,16 @@ def init_db():
         cur.execute("ALTER TABLE users ADD COLUMN pending_image_prompt TEXT DEFAULT ''")
     if "last_free_reset_at" not in existing_columns:
         cur.execute("ALTER TABLE users ADD COLUMN last_free_reset_at TEXT DEFAULT NULL")
+        if "video_mode" not in existing_columns:
+        cur.execute("ALTER TABLE users ADD COLUMN video_mode INTEGER NOT NULL DEFAULT 0")
+    if "video_model" not in existing_columns:
+        cur.execute("ALTER TABLE users ADD COLUMN video_model TEXT NOT NULL DEFAULT 'kwaivgi/kling-video-o1'")
+    if "video_flow" not in existing_columns:
+        cur.execute("ALTER TABLE users ADD COLUMN video_flow TEXT DEFAULT ''")
+    if "video_duration" not in existing_columns:
+        cur.execute("ALTER TABLE users ADD COLUMN video_duration INTEGER NOT NULL DEFAULT 5")
+    if "video_aspect_ratio" not in existing_columns:
+        cur.execute("ALTER TABLE users ADD COLUMN video_aspect_ratio TEXT NOT NULL DEFAULT '16:9'")
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS payments (
@@ -172,14 +209,19 @@ def ensure_user(user_id: int):
     cur.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
     row = cur.fetchone()
 
-    if not row:
+        if not row:
         cur.execute("""
             INSERT INTO users (
                 user_id, model, free_tokens, paid_tokens,
-                image_mode, image_model, image_flow, pending_image_prompt, last_free_reset_at
+                image_mode, image_model, image_flow, pending_image_prompt, last_free_reset_at,
+                video_mode, video_model, video_flow, video_duration, video_aspect_ratio
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (user_id, DEFAULT_MODEL, FREE_TOKENS, 0, 0, DEFAULT_IMAGE_MODEL, "", "", None))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user_id, DEFAULT_MODEL, FREE_TOKENS, 0,
+            0, DEFAULT_IMAGE_MODEL, "", "", None,
+            0, DEFAULT_VIDEO_MODEL, "", DEFAULT_VIDEO_DURATION, DEFAULT_VIDEO_ASPECT_RATIO
+        ))
         conn.commit()
 
     conn.close()
@@ -191,8 +233,27 @@ def get_user_data(user_id: int):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
+    def get_user_data(user_id: int):
+    ensure_user(user_id)
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
     cur.execute("""
-        SELECT model, free_tokens, paid_tokens, image_mode, image_model, image_flow, pending_image_prompt, last_free_reset_at
+        SELECT
+            model,
+            free_tokens,
+            paid_tokens,
+            image_mode,
+            image_model,
+            image_flow,
+            pending_image_prompt,
+            last_free_reset_at,
+            video_mode,
+            video_model,
+            video_flow,
+            video_duration,
+            video_aspect_ratio
         FROM users
         WHERE user_id = ?
     """, (user_id,))
@@ -209,6 +270,14 @@ def get_user_data(user_id: int):
         set_image_model(user_id, DEFAULT_IMAGE_MODEL)
         image_model = DEFAULT_IMAGE_MODEL
 
+    video_model = row[9]
+    if video_model not in VIDEO_MODELS:
+        set_video_model(user_id, DEFAULT_VIDEO_MODEL)
+        video_model = DEFAULT_VIDEO_MODEL
+
+    video_duration = row[11] if row[11] in (5, 10) else DEFAULT_VIDEO_DURATION
+    video_aspect_ratio = row[12] if row[12] in ("16:9", "9:16", "1:1") else DEFAULT_VIDEO_ASPECT_RATIO
+
     return {
         "model": model,
         "free_tokens": row[1],
@@ -217,7 +286,12 @@ def get_user_data(user_id: int):
         "image_model": image_model,
         "image_flow": row[5] or "",
         "pending_image_prompt": row[6] or "",
-        "last_free_reset_at": row[7]
+        "last_free_reset_at": row[7],
+        "video_mode": bool(row[8]),
+        "video_model": video_model,
+        "video_flow": row[10] or "",
+        "video_duration": video_duration,
+        "video_aspect_ratio": video_aspect_ratio
     }
 
 
@@ -286,6 +360,73 @@ def clear_image_state(user_id: int):
             pending_image_prompt = ''
         WHERE user_id = ?
     """, (user_id,))
+    conn.commit()
+    conn.close()
+
+def set_video_mode(user_id: int, enabled: bool):
+    ensure_user(user_id)
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET video_mode = ? WHERE user_id = ?", (1 if enabled else 0, user_id))
+    conn.commit()
+    conn.close()
+
+
+def set_video_model(user_id: int, model: str):
+    ensure_user(user_id)
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET video_model = ? WHERE user_id = ?", (model, user_id))
+    conn.commit()
+    conn.close()
+
+
+def set_video_flow(user_id: int, flow: str):
+    ensure_user(user_id)
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET video_flow = ? WHERE user_id = ?", (flow, user_id))
+    conn.commit()
+    conn.close()
+
+
+def set_video_duration(user_id: int, duration: int):
+    ensure_user(user_id)
+    if duration not in (5, 10):
+        duration = DEFAULT_VIDEO_DURATION
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET video_duration = ? WHERE user_id = ?", (duration, user_id))
+    conn.commit()
+    conn.close()
+
+
+def set_video_aspect_ratio(user_id: int, aspect_ratio: str):
+    ensure_user(user_id)
+    if aspect_ratio not in ("16:9", "9:16", "1:1"):
+        aspect_ratio = DEFAULT_VIDEO_ASPECT_RATIO
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET video_aspect_ratio = ? WHERE user_id = ?", (aspect_ratio, user_id))
+    conn.commit()
+    conn.close()
+
+
+def clear_video_state(user_id: int):
+    ensure_user(user_id)
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE users
+        SET video_mode = 0,
+            video_model = ?,
+            video_flow = '',
+            video_duration = ?,
+            video_aspect_ratio = ?
+        WHERE user_id = ?
+    """, (DEFAULT_VIDEO_MODEL, DEFAULT_VIDEO_DURATION, DEFAULT_VIDEO_ASPECT_RATIO, user_id))
     conn.commit()
     conn.close()
 
@@ -631,7 +772,7 @@ def admin_add_tokens(user_id: int, amount: int):
 def get_main_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row(BTN_AI)
-    kb.row(BTN_NANO)
+    kb.row(BTN_NANO, BTN_VIDEO)
     kb.row(BTN_BALANCE, BTN_TOPUP)
     kb.row(BTN_RESET)
     return kb
@@ -640,6 +781,13 @@ def get_main_keyboard():
 def get_image_mode_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row(BTN_NANO)
+    kb.row(BTN_BALANCE, BTN_TOPUP)
+    kb.row(BTN_EXIT, BTN_RESET)
+    return kb
+
+def get_video_mode_keyboard():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row(BTN_VIDEO)
     kb.row(BTN_BALANCE, BTN_TOPUP)
     kb.row(BTN_EXIT, BTN_RESET)
     return kb
@@ -688,6 +836,62 @@ def get_payments_keyboard():
         ))
     return kb
 
+def get_kling_video_keyboard(user_id: int):
+    data = get_user_data(user_id)
+    model = data["video_model"]
+    duration = data["video_duration"]
+    aspect_ratio = data["video_aspect_ratio"]
+    flow = data["video_flow"]
+    cost = get_video_cost(model, duration)
+
+    kb = types.InlineKeyboardMarkup()
+
+    kb.row(
+        types.InlineKeyboardButton(
+            f"{'✅ ' if flow == 'prompt_only' else ''}По тексту",
+            callback_data="videoflow:prompt_only"
+        ),
+        types.InlineKeyboardButton(
+            f"{'✅ ' if flow == 'photo_plus_prompt' else ''}По фото+описанию",
+            callback_data="videoflow:photo_plus_prompt"
+        )
+    )
+
+    kb.row(
+        types.InlineKeyboardButton(
+            f"{'✅ ' if duration == 5 else ''}5с",
+            callback_data="videoduration:5"
+        ),
+        types.InlineKeyboardButton(
+            f"{'✅ ' if duration == 10 else ''}10с",
+            callback_data="videoduration:10"
+        )
+    )
+
+    kb.row(
+        types.InlineKeyboardButton(
+            f"{'✅ ' if aspect_ratio == '16:9' else ''}16:9",
+            callback_data="videoaspect:16:9"
+        ),
+        types.InlineKeyboardButton(
+            f"{'✅ ' if aspect_ratio == '9:16' else ''}9:16",
+            callback_data="videoaspect:9:16"
+        ),
+        types.InlineKeyboardButton(
+            f"{'✅ ' if aspect_ratio == '1:1' else ''}1:1",
+            callback_data="videoaspect:1:1"
+        )
+    )
+
+    kb.add(
+        types.InlineKeyboardButton(
+            f"🎬 Начать ({cost} {TOKEN_EMOJI})",
+            callback_data="videohelp:show"
+        )
+    )
+
+    return kb
+
 
 def format_balance_text(user_id: int):
     return balance_line(user_id)
@@ -720,6 +924,10 @@ def get_image_cost(model: str, flow: str):
     if flow == "photo_plus_prompt":
         return PHOTO_PROMPT_COSTS.get(model, 1)
     return 1
+
+def get_video_cost(model: str, duration: int):
+    model_prices = VIDEO_PROMPT_COSTS.get(model, {})
+    return model_prices.get(duration, 40)
 
 
 def extract_data_url_parts(data_url: str):
@@ -875,6 +1083,106 @@ def generate_image_openrouter(model: str, prompt_text: str, input_image_data_url
 
     return {"ok": False, "error": "⚠️ Модель не вернула изображение. Попробуй другой промт или другую модель."}
 
+def submit_openrouter_video_generation(
+    model: str,
+    prompt: str,
+    duration: int = 5,
+    aspect_ratio: str = "16:9",
+    input_image_data_url: str | None = None
+):
+    url = "https://openrouter.ai/api/v1/videos"
+
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "duration": duration,
+        "aspect_ratio": aspect_ratio
+    }
+
+    if input_image_data_url:
+        payload["frame_images"] = [
+            {
+                "type": "image_url",
+                "image_url": {"url": input_image_data_url},
+                "frame": "first"
+            }
+        ]
+
+    try:
+        resp = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json=payload,
+            timeout=60
+        )
+
+        if resp.status_code not in (200, 202):
+            logger.error("OpenRouter video submit error %s: %s", resp.status_code, resp.text)
+            return {"ok": False, "error": f"Не удалось поставить видео в очередь: {resp.text[:500]}"}
+
+        data = resp.json()
+        return {
+            "ok": True,
+            "id": data.get("id"),
+            "polling_url": data.get("polling_url"),
+            "status": data.get("status", "pending")
+        }
+
+    except Exception as e:
+        logger.exception("Ошибка submit video generation: %s", e)
+        return {"ok": False, "error": "Ошибка при запуске генерации видео."}
+
+def poll_openrouter_video(polling_url: str):
+    try:
+        resp = requests.get(
+            polling_url,
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}"
+            },
+            timeout=60
+        )
+
+        if resp.status_code != 200:
+            logger.error("OpenRouter video poll error %s: %s", resp.status_code, resp.text)
+            return {"ok": False, "error": "Ошибка проверки статуса видео."}
+
+        data = resp.json()
+        return {
+            "ok": True,
+            "status": data.get("status"),
+            "unsigned_urls": data.get("unsigned_urls", []),
+            "error_message": data.get("error"),
+            "raw": data
+        }
+
+    except Exception as e:
+        logger.exception("Ошибка polling video generation: %s", e)
+        return {"ok": False, "error": "Ошибка polling статуса видео."}
+
+def download_video_file(video_url: str, prefix: str = "kling"):
+    filename = f"{prefix}_{int(time.time())}_{uuid.uuid4().hex[:8]}.mp4"
+    file_path = os.path.join(GENERATED_VIDEOS_DIR, filename)
+
+    try:
+        resp = requests.get(video_url, timeout=300)
+        if resp.status_code != 200:
+            logger.error("Video download error %s: %s", resp.status_code, resp.text[:500])
+            return None
+
+        with open(file_path, "wb") as f:
+            f.write(resp.content)
+
+        return file_path
+
+    except Exception as e:
+        logger.exception("Ошибка скачивания видео: %s", e)
+        return None
+
+
+
 
 def create_yookassa_payment(user_id: int, plan_key: str):
     if not YOOKASSA_ENABLED:
@@ -939,6 +1247,7 @@ def create_yookassa_payment(user_id: int, plan_key: str):
     except Exception as e:
         logger.exception("Ошибка создания платежа YooKassa: %s", e)
         return None, None
+
 
 
 def apply_payment_if_needed(payment_id: str):
@@ -1279,6 +1588,370 @@ def process_nano_photo_plus_prompt(message):
         caption_file="📎 Оригинал без сжатия"
     )
 
+def process_video_prompt(message):
+    user_id = message.from_user.id
+    user_data = get_user_data(user_id)
+
+    model = user_data["video_model"]
+    model_name = VIDEO_MODELS.get(model, model)
+    flow = user_data["video_flow"] or "prompt_only"
+    duration = user_data["video_duration"]
+    aspect_ratio = user_data["video_aspect_ratio"]
+    cost = get_video_cost(model, duration)
+
+    if flow != "prompt_only":
+        bot.send_message(
+            message.chat.id,
+            "Сейчас выбран режим *по фото + описание*.\n"
+            "Отправь фото с подписью, что нужно сгенерировать.",
+            parse_mode="Markdown",
+            reply_markup=get_video_mode_keyboard()
+        )
+        return
+
+    prompt_text = (message.text or "").strip()
+    if not prompt_text:
+        bot.send_message(
+            message.chat.id,
+            "Напиши текстовый промт для генерации видео.",
+            reply_markup=get_video_mode_keyboard()
+        )
+        return
+
+    total_tokens = get_total_tokens(user_id)
+    if total_tokens < cost:
+        bot.send_message(
+            message.chat.id,
+            f"❌ Недостаточно токенов для *{model_name}*.\n\n"
+            f"Стоимость генерации: *{cost}* {TOKEN_EMOJI}\n"
+            f"💰 Твой баланс: *{total_tokens}* {TOKEN_EMOJI}",
+            parse_mode="Markdown",
+            reply_markup=get_video_mode_keyboard()
+        )
+        return
+
+    wait_msg = bot.send_message(
+        message.chat.id,
+        f"🎬 Запускаю генерацию видео через *{model_name}*...\n"
+        f"Режим: *по тексту*\n"
+        f"Длительность: *{duration}с*\n"
+        f"Формат: *{aspect_ratio}*\n\n"
+        f"Это может занять некоторое время.",
+        parse_mode="Markdown"
+    )
+
+    submit_result = submit_openrouter_video_generation(
+        model=model,
+        prompt=prompt_text,
+        duration=duration,
+        aspect_ratio=aspect_ratio,
+        input_image_data_url=None
+    )
+
+    if not submit_result["ok"]:
+        safe_edit_message(
+            message.chat.id,
+            wait_msg.message_id,
+            f"❌ {submit_result['error']}",
+            reply_markup=None
+        )
+        bot.send_message(
+            message.chat.id,
+            "Попробуй ещё раз.",
+            reply_markup=get_video_mode_keyboard()
+        )
+        return
+
+    success, source, charged = consume_tokens(user_id, cost)
+    if not success:
+        safe_edit_message(
+            message.chat.id,
+            wait_msg.message_id,
+            f"❌ Не удалось списать токены.\n\n{balance_line(user_id)}",
+            reply_markup=None
+        )
+        return
+
+    safe_edit_message(
+        message.chat.id,
+        wait_msg.message_id,
+        f"🎬 Видео поставлено в очередь.\n"
+        f"💸 Списано: *{charged}* {TOKEN_EMOJI}\n"
+        f"Режим: *по тексту*\n"
+        f"Длительность: *{duration}с*\n"
+        f"Формат: *{aspect_ratio}*\n"
+        f"{balance_line(user_id)}\n\n"
+        f"Ожидаю результат...",
+        reply_markup=None
+    )
+
+    polling_url = submit_result.get("polling_url")
+    if not polling_url:
+        bot.send_message(
+            message.chat.id,
+            "❌ OpenRouter не вернул polling_url.",
+            reply_markup=get_video_mode_keyboard()
+        )
+        return
+
+    for _ in range(VIDEO_POLL_MAX_ATTEMPTS):
+        time.sleep(VIDEO_POLL_INTERVAL)
+        poll_result = poll_openrouter_video(polling_url)
+
+        if not poll_result["ok"]:
+            continue
+
+        status = poll_result["status"]
+
+        if status in ("pending", "in_progress"):
+            continue
+
+        if status == "failed":
+            bot.send_message(
+                message.chat.id,
+                f"❌ Генерация видео завершилась ошибкой.\n{poll_result.get('error_message') or ''}",
+                reply_markup=get_video_mode_keyboard()
+            )
+            return
+
+        if status == "completed":
+            urls = poll_result.get("unsigned_urls", [])
+            if not urls:
+                bot.send_message(
+                    message.chat.id,
+                    "❌ Видео готово, но ссылка на файл не получена.",
+                    reply_markup=get_video_mode_keyboard()
+                )
+                return
+
+            file_path = download_video_file(urls[0], prefix="kling_text")
+            if not file_path:
+                bot.send_message(
+                    message.chat.id,
+                    "❌ Не удалось скачать готовое видео.",
+                    reply_markup=get_video_mode_keyboard()
+                )
+                return
+
+            with open(file_path, "rb") as f:
+                bot.send_video(
+                    message.chat.id,
+                    f,
+                    caption=f"🎬 *{model_name}*\nГотово.",
+                    parse_mode="Markdown"
+                )
+
+            with open(file_path, "rb") as f:
+                bot.send_document(
+                    message.chat.id,
+                    f,
+                    caption="📎 Оригинал видео файлом"
+                )
+
+            bot.send_message(
+                message.chat.id,
+                "Можешь отправить новый промт или изменить параметры генерации.",
+                reply_markup=get_video_mode_keyboard()
+            )
+            return
+
+    bot.send_message(
+        message.chat.id,
+        "⏳ Генерация выполняется слишком долго. Попробуй позже.",
+        reply_markup=get_video_mode_keyboard()
+    )
+
+def process_video_photo_plus_prompt(message):
+    user_id = message.from_user.id
+    user_data = get_user_data(user_id)
+
+    model = user_data["video_model"]
+    model_name = VIDEO_MODELS.get(model, model)
+    flow = user_data["video_flow"] or "prompt_only"
+    duration = user_data["video_duration"]
+    aspect_ratio = user_data["video_aspect_ratio"]
+    cost = get_video_cost(model, duration)
+
+    if flow != "photo_plus_prompt":
+        bot.send_message(
+            message.chat.id,
+            "Сейчас выбран режим *по тексту*.\n"
+            "Отправь обычное текстовое сообщение с промтом.",
+            parse_mode="Markdown",
+            reply_markup=get_video_mode_keyboard()
+        )
+        return
+
+    prompt_text = (message.caption or "").strip()
+    if not prompt_text:
+        bot.send_message(
+            message.chat.id,
+            "🖼 Отправь фото *с подписью*, что нужно сгенерировать.",
+            parse_mode="Markdown",
+            reply_markup=get_video_mode_keyboard()
+        )
+        return
+
+    total_tokens = get_total_tokens(user_id)
+    if total_tokens < cost:
+        bot.send_message(
+            message.chat.id,
+            f"❌ Недостаточно токенов для *{model_name}*.\n\n"
+            f"Стоимость генерации: *{cost}* {TOKEN_EMOJI}\n"
+            f"💰 Твой баланс: *{total_tokens}* {TOKEN_EMOJI}",
+            parse_mode="Markdown",
+            reply_markup=get_video_mode_keyboard()
+        )
+        return
+
+    wait_msg = bot.send_message(
+        message.chat.id,
+        f"🎬 Запускаю генерацию видео через *{model_name}*...\n"
+        f"Режим: *по фото + описание*\n"
+        f"Длительность: *{duration}с*\n"
+        f"Формат: *{aspect_ratio}*\n\n"
+        f"Это может занять некоторое время.",
+        parse_mode="Markdown"
+    )
+
+    try:
+        input_image_data_url = telegram_photo_to_data_url(message)
+    except Exception as e:
+        logger.exception("Ошибка получения фото для Kling Video: %s", e)
+        safe_edit_message(
+            message.chat.id,
+            wait_msg.message_id,
+            "❌ Не удалось скачать фото из Telegram.",
+            reply_markup=None
+        )
+        bot.send_message(
+            message.chat.id,
+            "Попробуй снова.",
+            reply_markup=get_video_mode_keyboard()
+        )
+        return
+
+    submit_result = submit_openrouter_video_generation(
+        model=model,
+        prompt=prompt_text,
+        duration=duration,
+        aspect_ratio=aspect_ratio,
+        input_image_data_url=input_image_data_url
+    )
+
+    if not submit_result["ok"]:
+        safe_edit_message(
+            message.chat.id,
+            wait_msg.message_id,
+            f"❌ {submit_result['error']}",
+            reply_markup=None
+        )
+        bot.send_message(
+            message.chat.id,
+            "Попробуй ещё раз.",
+            reply_markup=get_video_mode_keyboard()
+        )
+        return
+
+    success, source, charged = consume_tokens(user_id, cost)
+    if not success:
+        safe_edit_message(
+            message.chat.id,
+            wait_msg.message_id,
+            f"❌ Не удалось списать токены.\n\n{balance_line(user_id)}",
+            reply_markup=None
+        )
+        return
+
+    safe_edit_message(
+        message.chat.id,
+        wait_msg.message_id,
+        f"🎬 Видео поставлено в очередь.\n"
+        f"💸 Списано: *{charged}* {TOKEN_EMOJI}\n"
+        f"Режим: *по фото + описание*\n"
+        f"Длительность: *{duration}с*\n"
+        f"Формат: *{aspect_ratio}*\n"
+        f"{balance_line(user_id)}\n\n"
+        f"Ожидаю результат...",
+        reply_markup=None
+    )
+
+    polling_url = submit_result.get("polling_url")
+    if not polling_url:
+        bot.send_message(
+            message.chat.id,
+            "❌ OpenRouter не вернул polling_url.",
+            reply_markup=get_video_mode_keyboard()
+        )
+        return
+
+    for _ in range(VIDEO_POLL_MAX_ATTEMPTS):
+        time.sleep(VIDEO_POLL_INTERVAL)
+        poll_result = poll_openrouter_video(polling_url)
+
+        if not poll_result["ok"]:
+            continue
+
+        status = poll_result["status"]
+
+        if status in ("pending", "in_progress"):
+            continue
+
+        if status == "failed":
+            bot.send_message(
+                message.chat.id,
+                f"❌ Генерация видео завершилась ошибкой.\n{poll_result.get('error_message') or ''}",
+                reply_markup=get_video_mode_keyboard()
+            )
+            return
+
+        if status == "completed":
+            urls = poll_result.get("unsigned_urls", [])
+            if not urls:
+                bot.send_message(
+                    message.chat.id,
+                    "❌ Видео готово, но ссылка на файл не получена.",
+                    reply_markup=get_video_mode_keyboard()
+                )
+                return
+
+            file_path = download_video_file(urls[0], prefix="kling_photo")
+            if not file_path:
+                bot.send_message(
+                    message.chat.id,
+                    "❌ Не удалось скачать готовое видео.",
+                    reply_markup=get_video_mode_keyboard()
+                )
+                return
+
+            with open(file_path, "rb") as f:
+                bot.send_video(
+                    message.chat.id,
+                    f,
+                    caption=f"🎬 *{model_name}*\nГотово.",
+                    parse_mode="Markdown"
+                )
+
+            with open(file_path, "rb") as f:
+                bot.send_document(
+                    message.chat.id,
+                    f,
+                    caption="📎 Оригинал видео файлом"
+                )
+
+            bot.send_message(
+                message.chat.id,
+                "Можешь отправить новое фото с подписью или изменить параметры генерации.",
+                reply_markup=get_video_mode_keyboard()
+            )
+            return
+
+    bot.send_message(
+        message.chat.id,
+        "⏳ Генерация выполняется слишком долго. Попробуй позже.",
+        reply_markup=get_video_mode_keyboard()
+    )
+
 
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
@@ -1553,13 +2226,47 @@ def btn_nano_banana(message):
 
 @bot.message_handler(func=lambda m: m.text == BTN_EXIT)
 def btn_exit_mode(message):
-    clear_image_state(message.from_user.id)
+    user_id = message.from_user.id
+    clear_image_state(user_id)
+    clear_video_state(user_id)
+
     bot.send_message(
         message.chat.id,
-        "✅ Режим изображений выключен.\nТеперь бот снова работает как обычный чат.",
+        "✅ Режим изображений/видео выключен.\nТеперь бот снова работает как обычный чат.",
         reply_markup=get_main_keyboard()
     )
 
+@bot.message_handler(func=lambda m: m.text == BTN_VIDEO)
+def btn_kling_video(message):
+    user_id = message.from_user.id
+
+    clear_image_state(user_id)
+    set_video_mode(user_id, True)
+    set_video_model(user_id, DEFAULT_VIDEO_MODEL)
+    set_video_flow(user_id, "prompt_only")
+    set_video_duration(user_id, DEFAULT_VIDEO_DURATION)
+    set_video_aspect_ratio(user_id, DEFAULT_VIDEO_ASPECT_RATIO)
+
+    model_name = VIDEO_MODELS[DEFAULT_VIDEO_MODEL]
+    cost = get_video_cost(DEFAULT_VIDEO_MODEL, DEFAULT_VIDEO_DURATION)
+
+    bot.send_message(
+        message.chat.id,
+        f"🎬 *Режим Kling Video включен*\\n\\n"
+        f"Модель: *{model_name}*\\n"
+        f"Текущая длительность: *{DEFAULT_VIDEO_DURATION}с*\\n"
+        f"Текущий формат: *{DEFAULT_VIDEO_ASPECT_RATIO}*\\n"
+        f"Стоимость: *{cost}* {TOKEN_EMOJI}\\n"
+        f"{balance_line(user_id)}\\n\\n"
+        f"Выбери режим генерации, длительность и формат:",
+        reply_markup=get_video_mode_keyboard()
+    )
+
+    bot.send_message(
+        message.chat.id,
+        "⚙️ Настройки видео:",
+        reply_markup=get_kling_video_keyboard(user_id)
+    )
 
 @bot.message_handler(func=lambda m: m.text == BTN_TOPUP)
 def btn_payments(message):
@@ -1689,15 +2396,149 @@ def callback_payplan(call):
         reply_markup=kb
     )
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith("videoflow:"))
+def callback_video_flow(call):
+    flow = call.data.split("videoflow:", 1)[1]
+    user_id = call.from_user.id
+
+    if flow not in {"prompt_only", "photo_plus_prompt"}:
+        bot.answer_callback_query(call.id, "Неизвестный режим")
+        return
+
+    set_video_flow(user_id, flow)
+    data = get_user_data(user_id)
+
+    bot.answer_callback_query(call.id, "Режим обновлён")
+
+    flow_text = "по тексту" if flow == "prompt_only" else "по фото + описание"
+
+    safe_edit_message(
+        call.message.chat.id,
+        call.message.message_id,
+        f"🎬 *Kling Video*\\n\\n"
+        f"Режим: *{flow_text}*\\n"
+        f"Длительность: *{data['video_duration']}с*\\n"
+        f"Формат: *{data['video_aspect_ratio']}*\\n"
+        f"Стоимость: *{get_video_cost(data['video_model'], data['video_duration'])}* {TOKEN_EMOJI}\\n"
+        f"{balance_line(user_id)}\\n\\n"
+        f"Выбери параметры ниже, затем отправь:\\n"
+        f"- текстовый промт, если выбран режим по тексту;\\n"
+        f"- фото с подписью, если выбран режим по фото.",
+        reply_markup=get_kling_video_keyboard(user_id)
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("videoduration:"))
+def callback_video_duration(call):
+    value = call.data.split("videoduration:", 1)[1]
+    user_id = call.from_user.id
+
+    try:
+        duration = int(value)
+    except ValueError:
+        bot.answer_callback_query(call.id, "Некорректная длительность")
+        return
+
+    if duration not in (5, 10):
+        bot.answer_callback_query(call.id, "Доступно только 5с или 10с")
+        return
+
+    set_video_duration(user_id, duration)
+    data = get_user_data(user_id)
+
+    bot.answer_callback_query(call.id, f"Длительность: {duration}с")
+
+    flow_text = "по тексту" if data["video_flow"] == "prompt_only" else "по фото + описание"
+
+    safe_edit_message(
+        call.message.chat.id,
+        call.message.message_id,
+        f"🎬 *Kling Video*\\n\\n"
+        f"Режим: *{flow_text}*\\n"
+        f"Длительность: *{data['video_duration']}с*\\n"
+        f"Формат: *{data['video_aspect_ratio']}*\\n"
+        f"Стоимость: *{get_video_cost(data['video_model'], data['video_duration'])}* {TOKEN_EMOJI}\\n"
+        f"{balance_line(user_id)}\\n\\n"
+        f"Выбери параметры ниже, затем отправь запрос.",
+        reply_markup=get_kling_video_keyboard(user_id)
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("videoaspect:"))
+def callback_video_aspect(call):
+    aspect_ratio = call.data.split("videoaspect:", 1)[1]
+    user_id = call.from_user.id
+
+    if aspect_ratio not in {"16:9", "9:16", "1:1"}:
+        bot.answer_callback_query(call.id, "Некорректный формат")
+        return
+
+    set_video_aspect_ratio(user_id, aspect_ratio)
+    data = get_user_data(user_id)
+
+    bot.answer_callback_query(call.id, f"Формат: {aspect_ratio}")
+
+    flow_text = "по тексту" if data["video_flow"] == "prompt_only" else "по фото + описание"
+
+    safe_edit_message(
+        call.message.chat.id,
+        call.message.message_id,
+        f"🎬 *Kling Video*\\n\\n"
+        f"Режим: *{flow_text}*\\n"
+        f"Длительность: *{data['video_duration']}с*\\n"
+        f"Формат: *{data['video_aspect_ratio']}*\\n"
+        f"Стоимость: *{get_video_cost(data['video_model'], data['video_duration'])}* {TOKEN_EMOJI}\\n"
+        f"{balance_line(user_id)}\\n\\n"
+        f"Выбери параметры ниже, затем отправь запрос.",
+        reply_markup=get_kling_video_keyboard(user_id)
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "videohelp:show")
+def callback_video_help(call):
+    user_id = call.from_user.id
+    data = get_user_data(user_id)
+    flow_text = "по тексту" if data["video_flow"] == "prompt_only" else "по фото + описание"
+
+    bot.answer_callback_query(call.id, "Готово")
+
+    safe_edit_message(
+        call.message.chat.id,
+        call.message.message_id,
+        f"🎬 *Kling Video готов к запуску*\\n\\n"
+        f"Режим: *{flow_text}*\\n"
+        f"Длительность: *{data['video_duration']}с*\\n"
+        f"Формат: *{data['video_aspect_ratio']}*\\n"
+        f"Стоимость: *{get_video_cost(data['video_model'], data['video_duration'])}* {TOKEN_EMOJI}\\n"
+        f"{balance_line(user_id)}\\n\\n"
+        f"Теперь отправь:\\n"
+        f"- обычное текстовое сообщение для text-to-video;\\n"
+        f"- фото с подписью для image-to-video.",
+        reply_markup=get_kling_video_keyboard(user_id)
+    )
 
 @bot.message_handler(content_types=["photo"])
 def handle_photo(message):
     data = get_user_data(message.from_user.id)
 
+    if data.get("video_mode"):
+        if data.get("video_flow") == "photo_plus_prompt":
+            process_video_photo_plus_prompt(message)
+            return
+
+        bot.send_message(
+            message.chat.id,
+            "Сейчас в Kling выбран режим генерации *по тексту*.\n"
+            "Если хочешь генерацию по фото, переключи режим в настройках Kling.",
+            parse_mode="Markdown",
+            reply_markup=get_video_mode_keyboard()
+        )
+        return
+
     if not data["image_mode"]:
         bot.send_message(
             message.chat.id,
-            "Сначала включи режим Nano Banana кнопкой 🍌 Nano Banana.",
+            "Сначала включи режим Nano Banana кнопкой 🍌 Nano Banana или видео режим кнопкой 🎬 Kling.",
             reply_markup=get_main_keyboard()
         )
         return
@@ -1720,13 +2561,17 @@ def handle_text(message):
         return
 
     user_id = message.from_user.id
-    user_data = get_user_data(user_id)
+    data = get_user_data(user_id)
 
-    if user_data["image_mode"]:
-        if user_data["image_flow"] == "prompt_only":
+    if data.get("video_mode"):
+        process_video_prompt(message)
+        return
+
+    if data["image_mode"]:
+        if data["image_flow"] == "prompt_only":
             process_nano_prompt_only(message)
             return
-        elif user_data["image_flow"] == "photo_plus_prompt":
+        elif data["image_flow"] == "photo_plus_prompt":
             bot.send_message(
                 message.chat.id,
                 "Сейчас выбран режим редактирования фото.\n"
