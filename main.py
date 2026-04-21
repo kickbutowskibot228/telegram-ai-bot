@@ -130,7 +130,7 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
-        cur.execute("""
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             model TEXT NOT NULL DEFAULT 'google/gemini-3-flash-preview',
@@ -140,12 +140,7 @@ def init_db():
             image_model TEXT NOT NULL DEFAULT 'google/gemini-3-pro-image-preview',
             image_flow TEXT DEFAULT '',
             pending_image_prompt TEXT DEFAULT '',
-            last_free_reset_at TEXT DEFAULT NULL,
-            video_mode INTEGER NOT NULL DEFAULT 0,
-            video_model TEXT NOT NULL DEFAULT 'kwaivgi/kling-video-o1',
-            video_flow TEXT DEFAULT '',
-            video_duration INTEGER NOT NULL DEFAULT 5,
-            video_aspect_ratio TEXT NOT NULL DEFAULT '16:9'
+            last_free_reset_at TEXT DEFAULT NULL
         )
     """)
 
@@ -163,16 +158,6 @@ def init_db():
         cur.execute("ALTER TABLE users ADD COLUMN pending_image_prompt TEXT DEFAULT ''")
     if "last_free_reset_at" not in existing_columns:
         cur.execute("ALTER TABLE users ADD COLUMN last_free_reset_at TEXT DEFAULT NULL")
-        if "video_mode" not in existing_columns:
-        cur.execute("ALTER TABLE users ADD COLUMN video_mode INTEGER NOT NULL DEFAULT 0")
-    if "video_model" not in existing_columns:
-        cur.execute("ALTER TABLE users ADD COLUMN video_model TEXT NOT NULL DEFAULT 'kwaivgi/kling-video-o1'")
-    if "video_flow" not in existing_columns:
-        cur.execute("ALTER TABLE users ADD COLUMN video_flow TEXT DEFAULT ''")
-    if "video_duration" not in existing_columns:
-        cur.execute("ALTER TABLE users ADD COLUMN video_duration INTEGER NOT NULL DEFAULT 5")
-    if "video_aspect_ratio" not in existing_columns:
-        cur.execute("ALTER TABLE users ADD COLUMN video_aspect_ratio TEXT NOT NULL DEFAULT '16:9'")
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS payments (
