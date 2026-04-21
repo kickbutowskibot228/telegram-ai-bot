@@ -1038,7 +1038,7 @@ def process_text_question(message):
         f"🤖 *{model_name}*\n\n"
         f"{answer}\n\n"
         f"💸 Списано: *{charged}* {TOKEN_EMOJI}\n"
-        f"💰 Твой баланс: *{total_left}* {TOKEN_EMОJI}",
+        f"💰 Твой баланс: *{total_left}* {TOKEN_EMOJI}",
         reply_markup=None
     )
 
@@ -1062,7 +1062,7 @@ def process_nano_prompt_only(message):
             message.chat.id,
             f"❌ Недостаточно токенов для *{model_name}*.\n\n"
             f"Стоимость генерации: *{cost}* {TOKEN_EMOJI}\n"
-            f"💰 Твой баланс: *{total_tokens}* {TOKEN_EMOJI}",
+            f"💰 Твой баланс: *{total_tokens}* {TOKEN_EMОJI}",
             reply_markup=get_image_mode_keyboard()
         )
         return
@@ -1167,7 +1167,7 @@ def process_nano_photo_plus_prompt(message):
             message.chat.id,
             f"❌ Недостаточно токенов для *{model_name}*.\n\n"
             f"Стоимость редактирования: *{cost}* {TOKEN_EMOJI}\n"
-            f"💰 Твой баланс: *{total_tokens}* {TOKEN_EMOJI}",
+            f"💰 Твой баланс: *{total_tokens}* {TOKEN_EMОJI}",
             reply_markup=get_image_mode_keyboard()
         )
         return
@@ -1285,26 +1285,11 @@ def cmd_start(message):
     ensure_user(message.from_user.id)
     clear_chat_history(message.from_user.id)
 
-    payment_text = (
-        f"💳 Пополнение {TOKEN_EMOJI} уже доступно."
-        if YOOKASSA_ENABLED
-        else "💳 Пополнение скоро будет доступно."
-    )
-
     bot.send_message(
         message.chat.id,
-        "Привет! Я AI-бот 🤖\n\n"
-        "Что я умею:\n"
-        "• отвечать на вопросы\n"
-        "• генерировать изображения через Nano Banana Pro\n"
-        "• менять текстовые модели\n\n"
-        "Нажми *🧠 GPT/Gemini/Claude*, чтобы выбрать модель и задать вопрос.",
-        reply_markup=get_main_keyboard()
-    )
-
-    bot.send_message(
-        message.chat.id,
-        payment_text,
+        "Я Patriot AI 🦸🏼‍♂️\n\n"
+        "Нажми 🧠 GPT/Gemini/Claude, чтобы выбрать модель и задать вопрос\n"
+        "Или 🍌 Nano Banana, чтобы сгенерировать изображение",
         reply_markup=get_main_keyboard()
     )
 
@@ -1467,7 +1452,7 @@ def cmd_addtokens(message):
     bot.send_message(
         message.chat.id,
         f"✅ Пользователю `{target_user_id}` начислено *{amount}* {TOKEN_EMOJI}\n"
-        f"💰 Новый баланс: *{total_tokens}* {TOKEN_EMOJI}",
+        f"💰 Новый баланс: *{total_tokens}* {TOKEN_EMОJI}",
         parse_mode="Markdown"
     )
 
@@ -1475,7 +1460,7 @@ def cmd_addtokens(message):
         bot.send_message(
             target_user_id,
             f"🎁 Администратор начислил тебе *{amount}* {TOKEN_EMOJI}\n"
-            f"💰 Твой баланс: *{total_tokens}* {TOKEN_EMОJI}",
+            f"💰 Твой баланс: *{total_tokens}* {TOKEN_EMOJI}",
             parse_mode="Markdown",
             reply_markup=get_main_keyboard()
         )
@@ -1658,7 +1643,7 @@ def callback_image_flow(call):
             call.message.chat.id,
             call.message.message_id,
             f"🍌 *Редактирование фото*\n"
-            f"Стоимость: *{cost}* {TOKEN_EMOJI}\n"
+            f"Стоимость: *{cost}* {TOKEN_EMОJI}\n"
             f"{balance_line(user_id)}\n\n"
             f"Отправь фото с подписью, что нужно изменить.",
             reply_markup=None
