@@ -9,6 +9,7 @@ import mimetypes
 import requests
 import telebot
 
+from datetime import datetime, timedelta
 from flask import Flask, request, abort
 from telebot import types
 from dotenv import load_dotenv
@@ -52,6 +53,7 @@ app = Flask(__name__)
 
 DB_PATH = "bot.db"
 FREE_TOKENS = 40
+FREE_RESET_COOLDOWN_DAYS = 3
 TOKEN_EMOJI = "🍼"
 GENERATED_DIR = "generated_images"
 
@@ -113,7 +115,8 @@ def init_db():
             image_mode INTEGER NOT NULL DEFAULT 0,
             image_model TEXT NOT NULL DEFAULT 'google/gemini-3-pro-image-preview',
             image_flow TEXT DEFAULT '',
-            pending_image_prompt TEXT DEFAULT ''
+            pending_image_prompt TEXT DEFAULT '',
+            last_free_reset_at TEXT DEFAULT NULL
         )
     """)
 
@@ -129,6 +132,8 @@ def init_db():
         cur.execute("ALTER TABLE users ADD COLUMN image_flow TEXT DEFAULT ''")
     if "pending_image_prompt" not in existing_columns:
         cur.execute("ALTER TABLE users ADD COLUMN pending_image_prompt TEXT DEFAULT ''")
+    if "last_free_reset_at" not in existing_columns:
+        cur.execute("ALTER TABLE users ADD COLUMN last_free_reset_at TEXT DEFAULT NULL")
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS payments (
@@ -159,10 +164,10 @@ def ensure_user(user_id: int):
         cur.execute("""
             INSERT INTO users (
                 user_id, model, free_tokens, paid_tokens,
-                image_mode, image_model, image_flow, pending_image_prompt
+                image_mode, image_model, image_flow, pending_image_prompt, last_free_reset_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (user_id, DEFAULT_MODEL, FREE_TOKENS, 0, 0, DEFAULT_IMAGE_MODEL, "", ""))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (user_id, DEFAULT_MODEL, FREE_TOKENS, 0, 0, DEFAULT_IMAGE_MODEL, "", "", None))
         conn.commit()
 
     conn.close()
@@ -175,7 +180,7 @@ def get_user_data(user_id: int):
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT model, free_tokens, paid_tokens, image_mode, image_model, image_flow, pending_image_prompt
+        SELECT model, free_tokens, paid_tokens, image_mode, image_model, image_flow, pending_image_prompt, last_free_reset_at
         FROM users
         WHERE user_id = ?
     """, (user_id,))
@@ -199,7 +204,8 @@ def get_user_data(user_id: int):
         "image_mode": bool(row[3]),
         "image_model": image_model,
         "image_flow": row[5] or "",
-        "pending_image_prompt": row[6] or ""
+        "pending_image_prompt": row[6] or "",
+        "last_free_reset_at": row[7]
     }
 
 
@@ -272,11 +278,81 @@ def clear_image_state(user_id: int):
     conn.close()
 
 
-def reset_free_tokens(user_id: int):
+def get_last_free_reset_at(user_id: int):
     ensure_user(user_id)
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("UPDATE users SET free_tokens = ? WHERE user_id = ?", (FREE_TOKENS, user_id))
+    cur.execute("SELECT last_free_reset_at FROM users WHERE user_id = ?", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row or not row[0]:
+        return None
+
+    try:
+        return datetime.fromisoformat(row[0])
+    except Exception:
+        return None
+
+
+def set_last_free_reset_at(user_id: int, dt: datetime):
+    ensure_user(user_id)
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET last_free_reset_at = ? WHERE user_id = ?",
+        (dt.isoformat(), user_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def can_reset_free_tokens(user_id: int):
+    last_reset = get_last_free_reset_at(user_id)
+    if last_reset is None:
+        return True, None
+
+    next_reset_at = last_reset + timedelta(days=FREE_RESET_COOLDOWN_DAYS)
+    now = datetime.utcnow()
+
+    if now >= next_reset_at:
+        return True, None
+
+    return False, next_reset_at - now
+
+
+def format_timedelta_ru(delta: timedelta):
+    total_seconds = int(delta.total_seconds())
+    if total_seconds < 0:
+        total_seconds = 0
+
+    days = total_seconds // 86400
+    hours = (total_seconds % 86400) // 3600
+    minutes = (total_seconds % 3600) // 60
+
+    parts = []
+    if days > 0:
+        parts.append(f"{days} д.")
+    if hours > 0:
+        parts.append(f"{hours} ч.")
+    if minutes > 0 or not parts:
+        parts.append(f"{minutes} мин.")
+
+    return " ".join(parts)
+
+
+def reset_free_tokens(user_id: int):
+    ensure_user(user_id)
+    now = datetime.utcnow()
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE users
+        SET free_tokens = ?,
+            last_free_reset_at = ?
+        WHERE user_id = ?
+    """, (FREE_TOKENS, now.isoformat(), user_id))
     conn.commit()
     conn.close()
 
@@ -423,7 +499,7 @@ def get_user_balance_info(user_id: int):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""
-        SELECT user_id, model, free_tokens, paid_tokens, image_mode, image_model
+        SELECT user_id, model, free_tokens, paid_tokens, image_mode, image_model, last_free_reset_at
         FROM users
         WHERE user_id = ?
     """, (user_id,))
@@ -440,7 +516,8 @@ def get_user_balance_info(user_id: int):
         "paid_tokens": row[3],
         "total_tokens": row[2] + row[3],
         "image_mode": bool(row[4]),
-        "image_model": row[5]
+        "image_model": row[5],
+        "last_free_reset_at": row[6]
     }
 
 
@@ -1143,10 +1220,22 @@ def cmd_start(message):
 
 @bot.message_handler(commands=["restart"])
 def cmd_restart(message):
-    reset_free_tokens(message.from_user.id)
+    user_id = message.from_user.id
+    allowed, wait_delta = can_reset_free_tokens(user_id)
+
+    if not allowed:
+        bot.send_message(
+            message.chat.id,
+            f"⏳ Бесплатные токены можно сбрасывать только раз в *{FREE_RESET_COOLDOWN_DAYS} дня*.\n\n"
+            f"Попробуй снова через: *{format_timedelta_ru(wait_delta)}*",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
+    reset_free_tokens(user_id)
     bot.send_message(
         message.chat.id,
-        f"🔄 Баланс обновлен.\n\n{balance_line(message.from_user.id)}",
+        f"🔄 Бесплатные токены восстановлены.\n\n{balance_line(user_id)}",
         reply_markup=get_main_keyboard()
     )
 
@@ -1206,6 +1295,10 @@ def cmd_user_info(message):
     model_name = TEXT_MODELS.get(info["model"], info["model"])
     image_model_name = IMAGE_MODELS.get(info["image_model"], info["image_model"])
 
+
+
+    last_reset_text = info["last_free_reset_at"] if info["last_free_reset_at"] else "никогда"
+
     bot.send_message(
         message.chat.id,
         f"👤 *Пользователь:* `{info['user_id']}`\n"
@@ -1214,7 +1307,8 @@ def cmd_user_info(message):
         f"🎁 Бесплатные: *{info['free_tokens']}* {TOKEN_EMOJI}\n"
         f"💳 Платные: *{info['paid_tokens']}* {TOKEN_EMOJI}\n"
         f"💰 Текущий баланс: *{info['total_tokens']}* {TOKEN_EMOJI}\n"
-        f"🖼 Режим изображений: *{'вкл' if info['image_mode'] else 'выкл'}*",
+        f"🖼 Режим изображений: *{'вкл' if info['image_mode'] else 'выкл'}*\n"
+        f"🔄 Последний сброс free-токенов: `{last_reset_text}`",
         parse_mode="Markdown"
     )
 
@@ -1292,12 +1386,27 @@ def cmd_addtokens(message):
 
 @bot.message_handler(func=lambda m: m.text == BTN_RESET)
 def btn_restart(message):
-    reset_free_tokens(message.from_user.id)
-    current_keyboard = get_image_mode_keyboard() if get_user_data(message.from_user.id)["image_mode"] else get_main_keyboard()
+    user_id = message.from_user.id
+    current_keyboard = get_image_mode_keyboard() if get_user_data(user_id)["image_mode"] else get_main_keyboard()
+
+    allowed, wait_delta = can_reset_free_tokens(user_id)
+
+    if not allowed:
+        wait_text = format_timedelta_ru(wait_delta)
+        bot.send_message(
+            message.chat.id,
+            f"⏳ Бесплатные токены можно сбрасывать только раз в *{FREE_RESET_COOLDOWN_DAYS} дня*.\n\n"
+            f"Попробуй снова через: *{wait_text}*",
+            reply_markup=current_keyboard
+        )
+        return
+
+    reset_free_tokens(user_id)
 
     bot.send_message(
         message.chat.id,
-        f"🔄 Баланс обновлен.\n\n{balance_line(message.from_user.id)}",
+        f"🔄 Бесплатные токены восстановлены.\n\n"
+        f"{balance_line(user_id)}",
         reply_markup=current_keyboard
     )
 
@@ -1527,7 +1636,6 @@ def handle_text(message):
     user_id = message.from_user.id
     user_data = get_user_data(user_id)
 
-    # если в режиме Nano Banana
     if user_data["image_mode"]:
         if user_data["image_flow"] == "prompt_only":
             process_nano_prompt_only(message)
@@ -1541,7 +1649,6 @@ def handle_text(message):
             )
             return
 
-    # обычный текстовый режим
     process_text_question(message)
 
 
