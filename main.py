@@ -136,10 +136,18 @@ def init_db():
             model TEXT NOT NULL DEFAULT 'google/gemini-3-flash-preview',
             free_tokens INTEGER NOT NULL DEFAULT 40,
             paid_tokens INTEGER NOT NULL DEFAULT 0,
+
             image_mode INTEGER NOT NULL DEFAULT 0,
             image_model TEXT NOT NULL DEFAULT 'google/gemini-3-pro-image-preview',
             image_flow TEXT DEFAULT '',
             pending_image_prompt TEXT DEFAULT '',
+
+            video_mode INTEGER NOT NULL DEFAULT 0,
+            video_model TEXT NOT NULL DEFAULT 'kwaivgi/kling-video-o1',
+            video_flow TEXT DEFAULT 'prompt_only',
+            video_duration INTEGER NOT NULL DEFAULT 5,
+            video_aspect_ratio TEXT NOT NULL DEFAULT '16:9',
+
             last_free_reset_at TEXT DEFAULT NULL
         )
     """)
@@ -156,6 +164,18 @@ def init_db():
         cur.execute("ALTER TABLE users ADD COLUMN image_flow TEXT DEFAULT ''")
     if "pending_image_prompt" not in existing_columns:
         cur.execute("ALTER TABLE users ADD COLUMN pending_image_prompt TEXT DEFAULT ''")
+
+    if "video_mode" not in existing_columns:
+        cur.execute("ALTER TABLE users ADD COLUMN video_mode INTEGER NOT NULL DEFAULT 0")
+    if "video_model" not in existing_columns:
+        cur.execute("ALTER TABLE users ADD COLUMN video_model TEXT NOT NULL DEFAULT 'kwaivgi/kling-video-o1'")
+    if "video_flow" not in existing_columns:
+        cur.execute("ALTER TABLE users ADD COLUMN video_flow TEXT DEFAULT 'prompt_only'")
+    if "video_duration" not in existing_columns:
+        cur.execute("ALTER TABLE users ADD COLUMN video_duration INTEGER NOT NULL DEFAULT 5")
+    if "video_aspect_ratio" not in existing_columns:
+        cur.execute("ALTER TABLE users ADD COLUMN video_aspect_ratio TEXT NOT NULL DEFAULT '16:9'")
+
     if "last_free_reset_at" not in existing_columns:
         cur.execute("ALTER TABLE users ADD COLUMN last_free_reset_at TEXT DEFAULT NULL")
 
@@ -198,10 +218,27 @@ def ensure_user(user_id: int):
         cur.execute("""
             INSERT INTO users (
                 user_id, model, free_tokens, paid_tokens,
-                image_mode, image_model, image_flow, pending_image_prompt, last_free_reset_at
+                image_mode, image_model, image_flow, pending_image_prompt,
+                video_mode, video_model, video_flow, video_duration, video_aspect_ratio,
+                last_free_reset_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (user_id, DEFAULT_MODEL, FREE_TOKENS, 0, 0, DEFAULT_IMAGE_MODEL, "", "", None))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user_id,
+            DEFAULT_MODEL,
+            FREE_TOKENS,
+            0,
+            0,
+            DEFAULT_IMAGE_MODEL,
+            "",
+            "",
+            0,
+            DEFAULT_VIDEO_MODEL,
+            "prompt_only",
+            DEFAULT_VIDEO_DURATION,
+            DEFAULT_VIDEO_ASPECT_RATIO,
+            None
+        ))
         conn.commit()
 
     conn.close()
@@ -220,6 +257,11 @@ def get_user_data(user_id: int):
                image_model,
                image_flow,
                pending_image_prompt,
+               video_mode,
+               video_model,
+               video_flow,
+               video_duration,
+               video_aspect_ratio,
                last_free_reset_at
         FROM users
         WHERE user_id = ?
@@ -237,6 +279,23 @@ def get_user_data(user_id: int):
         set_image_model(user_id, DEFAULT_IMAGE_MODEL)
         image_model = DEFAULT_IMAGE_MODEL
 
+    video_model = row[8]
+    if video_model not in VIDEO_MODELS:
+        set_video_model(user_id, DEFAULT_VIDEO_MODEL)
+        video_model = DEFAULT_VIDEO_MODEL
+
+    video_duration = row[10] if row[10] in (5, 10) else DEFAULT_VIDEO_DURATION
+    if row[10] != video_duration:
+        set_video_duration(user_id, video_duration)
+
+    video_aspect_ratio = row[11] if row[11] in ("16:9", "9:16", "1:1") else DEFAULT_VIDEO_ASPECT_RATIO
+    if row[11] != video_aspect_ratio:
+        set_video_aspect_ratio(user_id, video_aspect_ratio)
+
+    video_flow = row[9] if row[9] in ("prompt_only", "photo_plus_prompt") else "prompt_only"
+    if row[9] != video_flow:
+        set_video_flow(user_id, video_flow)
+
     return {
         "model": model,
         "free_tokens": row[1],
@@ -245,7 +304,12 @@ def get_user_data(user_id: int):
         "image_model": image_model,
         "image_flow": row[5] or "",
         "pending_image_prompt": row[6] or "",
-        "last_free_reset_at": row[7],
+        "video_mode": bool(row[7]),
+        "video_model": video_model,
+        "video_flow": video_flow,
+        "video_duration": video_duration,
+        "video_aspect_ratio": video_aspect_ratio,
+        "last_free_reset_at": row[12],
     }
 
 
@@ -745,6 +809,17 @@ def get_video_mode_keyboard():
     kb.row(BTN_BALANCE, BTN_TOPUP)
     kb.row(BTN_EXIT, BTN_RESET)
     return kb
+
+def get_current_keyboard(user_id: int):
+    data = get_user_data(user_id)
+
+    if data.get("video_mode"):
+        return get_video_mode_keyboard()
+
+    if data.get("image_mode"):
+        return get_image_mode_keyboard()
+
+    return get_main_keyboard()
 
 
 def get_models_keyboard():
@@ -1909,14 +1984,18 @@ def process_video_photo_plus_prompt(message):
 
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
-    ensure_user(message.from_user.id)
-    clear_chat_history(message.from_user.id)
+    user_id = message.from_user.id
+    ensure_user(user_id)
+    clear_chat_history(user_id)
+    clear_image_state(user_id)
+    clear_video_state(user_id)
 
     bot.send_message(
         message.chat.id,
         "Я Patriot AI 🦸🏼‍♂️\n\n"
         "Нажми 🧠 GPT/Gemini/Claude, чтобы выбрать модель и задать вопрос\n"
-        "Или 🍌 Nano Banana, чтобы сгенерировать изображение",
+        "Нажми 🍌 Nano Banana, чтобы сгенерировать или отредактировать изображение\n"
+        "Нажми 🎬 Kling, чтобы сгенерировать видео",
         reply_markup=get_main_keyboard()
     )
 
@@ -2098,7 +2177,7 @@ def cmd_addtokens(message):
 @bot.message_handler(func=lambda m: m.text == BTN_RESET)
 def btn_restart(message):
     user_id = message.from_user.id
-    current_keyboard = get_image_mode_keyboard() if get_user_data(user_id)["image_mode"] else get_main_keyboard()
+    current_keyboard = get_current_keyboard(user_id)
 
     allowed, wait_delta = can_reset_free_tokens(user_id)
 
@@ -2124,7 +2203,7 @@ def btn_restart(message):
 
 @bot.message_handler(func=lambda m: m.text == BTN_BALANCE)
 def btn_balance(message):
-    current_keyboard = get_image_mode_keyboard() if get_user_data(message.from_user.id)["image_mode"] else get_main_keyboard()
+    current_keyboard = get_current_keyboard(message.from_user.id)
 
     bot.send_message(
         message.chat.id,
@@ -2135,9 +2214,12 @@ def btn_balance(message):
 
 @bot.message_handler(func=lambda m: m.text == BTN_AI)
 def btn_text_models(message):
-    clear_image_state(message.from_user.id)
+    user_id = message.from_user.id
 
-    data = get_user_data(message.from_user.id)
+    clear_image_state(user_id)
+    clear_video_state(user_id)
+
+    data = get_user_data(user_id)
     current_name = TEXT_MODELS.get(data["model"], data["model"])
     current_cost = TEXT_MODEL_COSTS.get(data["model"], 1)
 
@@ -2146,7 +2228,7 @@ def btn_text_models(message):
         f"🧠 *Текстовый режим*\n\n"
         f"Текущая модель: *{current_name}*\n"
         f"Стоимость запроса: *{current_cost}* {TOKEN_EMOJI}\n"
-        f"{balance_line(message.from_user.id)}\n\n"
+        f"{balance_line(user_id)}\n\n"
         f"Выбери модель ниже, а потом просто напиши вопрос одним сообщением.",
         reply_markup=get_models_keyboard()
     )
@@ -2160,10 +2242,13 @@ def btn_text_models(message):
 
 @bot.message_handler(func=lambda m: m.text == BTN_NANO)
 def btn_nano_banana(message):
-    set_image_mode(message.from_user.id, True)
-    set_image_model(message.from_user.id, DEFAULT_IMAGE_MODEL)
-    set_image_flow(message.from_user.id, "")
-    set_pending_image_prompt(message.from_user.id, "")
+    user_id = message.from_user.id
+
+    clear_video_state(user_id)
+    set_image_mode(user_id, True)
+    set_image_model(user_id, DEFAULT_IMAGE_MODEL)
+    set_image_flow(user_id, "")
+    set_pending_image_prompt(user_id, "")
 
     bot.send_message(
         message.chat.id,
@@ -2174,7 +2259,7 @@ def btn_nano_banana(message):
     bot.send_message(
         message.chat.id,
         "Доступные действия:",
-        reply_markup=get_nano_actions_keyboard(message.from_user.id)
+        reply_markup=get_nano_actions_keyboard(user_id)
     )
 
 
@@ -2206,13 +2291,14 @@ def btn_kling_video(message):
 
     bot.send_message(
         message.chat.id,
-        f"🎬 *Режим Kling Video включен*\\n\\n"
-        f"Модель: *{model_name}*\\n"
-        f"Текущая длительность: *{DEFAULT_VIDEO_DURATION}с*\\n"
-        f"Текущий формат: *{DEFAULT_VIDEO_ASPECT_RATIO}*\\n"
-        f"Стоимость: *{cost}* {TOKEN_EMOJI}\\n"
-        f"{balance_line(user_id)}\\n\\n"
+        f"🎬 *Режим Kling Video включен*\n\n"
+        f"Модель: *{model_name}*\n"
+        f"Текущая длительность: *{DEFAULT_VIDEO_DURATION}с*\n"
+        f"Текущий формат: *{DEFAULT_VIDEO_ASPECT_RATIO}*\n"
+        f"Стоимость: *{cost}* {TOKEN_EMOJI}\n"
+        f"{balance_line(user_id)}\n\n"
         f"Выбери режим генерации, длительность и формат:",
+        parse_mode="Markdown",
         reply_markup=get_video_mode_keyboard()
     )
 
@@ -2224,19 +2310,20 @@ def btn_kling_video(message):
 
 @bot.message_handler(func=lambda m: m.text == BTN_TOPUP)
 def btn_payments(message):
-    current_keyboard = get_image_mode_keyboard() if get_user_data(message.from_user.id)["image_mode"] else get_main_keyboard()
+    user_id = message.from_user.id
+    current_keyboard = get_current_keyboard(user_id)
 
     bot.send_message(
         message.chat.id,
-        f"{balance_line(message.from_user.id)}\n\n"
+        f"{balance_line(user_id)}\n\n"
         f"Выбери пакет пополнения:",
         reply_markup=get_payments_keyboard()
     )
 
     bot.send_message(
         message.chat.id,
-        f"После выбора пакета откроется ссылка на оплату через YooKassa.\n"
-        f"После успешной оплаты токены будут автоматически начислены.",
+        "После выбора пакета откроется ссылка на оплату через YooKassa.\n"
+        "После успешной оплаты токены будут автоматически начислены.",
         reply_markup=current_keyboard
     )
 
@@ -2518,6 +2605,16 @@ def handle_text(message):
     data = get_user_data(user_id)
 
     if data.get("video_mode"):
+        if data.get("video_flow") == "photo_plus_prompt":
+            bot.send_message(
+                message.chat.id,
+                "Сейчас в Kling выбран режим *по фото + описание*.\n"
+                "Отправь фото с подписью, что нужно сгенерировать.",
+                parse_mode="Markdown",
+                reply_markup=get_video_mode_keyboard()
+            )
+            return
+
         process_video_prompt(message)
         return
 
