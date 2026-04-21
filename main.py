@@ -194,23 +194,17 @@ def ensure_user(user_id: int):
     cur.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
     row = cur.fetchone()
 
-        if not row:
+    if not row:
         cur.execute("""
             INSERT INTO users (
                 user_id, model, free_tokens, paid_tokens,
-                image_mode, image_model, image_flow, pending_image_prompt, last_free_reset_at,
-                video_mode, video_model, video_flow, video_duration, video_aspect_ratio
+                image_mode, image_model, image_flow, pending_image_prompt, last_free_reset_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            user_id, DEFAULT_MODEL, FREE_TOKENS, 0,
-            0, DEFAULT_IMAGE_MODEL, "", "", None,
-            0, DEFAULT_VIDEO_MODEL, "", DEFAULT_VIDEO_DURATION, DEFAULT_VIDEO_ASPECT_RATIO
-        ))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (user_id, DEFAULT_MODEL, FREE_TOKENS, 0, 0, DEFAULT_IMAGE_MODEL, "", "", None))
         conn.commit()
 
     conn.close()
-
 
 def get_user_data(user_id: int):
     ensure_user(user_id)
@@ -218,27 +212,15 @@ def get_user_data(user_id: int):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
-    def get_user_data(user_id: int):
-    ensure_user(user_id)
-
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-
     cur.execute("""
-        SELECT
-            model,
-            free_tokens,
-            paid_tokens,
-            image_mode,
-            image_model,
-            image_flow,
-            pending_image_prompt,
-            last_free_reset_at,
-            video_mode,
-            video_model,
-            video_flow,
-            video_duration,
-            video_aspect_ratio
+        SELECT model,
+               free_tokens,
+               paid_tokens,
+               image_mode,
+               image_model,
+               image_flow,
+               pending_image_prompt,
+               last_free_reset_at
         FROM users
         WHERE user_id = ?
     """, (user_id,))
@@ -255,14 +237,6 @@ def get_user_data(user_id: int):
         set_image_model(user_id, DEFAULT_IMAGE_MODEL)
         image_model = DEFAULT_IMAGE_MODEL
 
-    video_model = row[9]
-    if video_model not in VIDEO_MODELS:
-        set_video_model(user_id, DEFAULT_VIDEO_MODEL)
-        video_model = DEFAULT_VIDEO_MODEL
-
-    video_duration = row[11] if row[11] in (5, 10) else DEFAULT_VIDEO_DURATION
-    video_aspect_ratio = row[12] if row[12] in ("16:9", "9:16", "1:1") else DEFAULT_VIDEO_ASPECT_RATIO
-
     return {
         "model": model,
         "free_tokens": row[1],
@@ -272,11 +246,6 @@ def get_user_data(user_id: int):
         "image_flow": row[5] or "",
         "pending_image_prompt": row[6] or "",
         "last_free_reset_at": row[7],
-        "video_mode": bool(row[8]),
-        "video_model": video_model,
-        "video_flow": row[10] or "",
-        "video_duration": video_duration,
-        "video_aspect_ratio": video_aspect_ratio
     }
 
 
