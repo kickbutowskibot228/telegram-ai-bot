@@ -836,6 +836,7 @@ def get_models_keyboard():
 def get_nano_actions_keyboard(user_id: int):
     data = get_user_data(user_id)
     image_model = data["image_model"]
+    image_flow = data["image_flow"] or "prompt_only"
 
     prompt_cost = PROMPT_ONLY_COSTS.get(image_model, 1)
     photo_cost = PHOTO_PROMPT_COSTS.get(image_model, 1)
@@ -843,17 +844,48 @@ def get_nano_actions_keyboard(user_id: int):
     kb = types.InlineKeyboardMarkup()
     kb.add(
         types.InlineKeyboardButton(
-            f"Генерация по текстовому запросу ({prompt_cost} {TOKEN_EMOJI})",
+            f"{'✅ ' if image_flow == 'prompt_only' else ''}Генерация по тексту ({prompt_cost} {TOKEN_EMOJI})",
             callback_data="imgflow:prompt_only"
         )
     )
     kb.add(
         types.InlineKeyboardButton(
-            f"Редактирование фото ({photo_cost} {TOKEN_EMOJI})",
+            f"{'✅ ' if image_flow == 'photo_plus_prompt' else ''}Редактирование фото ({photo_cost} {TOKEN_EMOJI})",
             callback_data="imgflow:photo_plus_prompt"
         )
     )
     return kb
+
+
+def get_nano_mode_text(user_id: int):
+    data = get_user_data(user_id)
+    image_model = data["image_model"]
+    image_flow = data["image_flow"] or "prompt_only"
+
+    model_name = IMAGE_MODELS.get(image_model, image_model)
+    prompt_cost = PROMPT_ONLY_COSTS.get(image_model, 1)
+    photo_cost = PHOTO_PROMPT_COSTS.get(image_model, 1)
+
+    if image_flow == "photo_plus_prompt":
+        current_mode = "Редактирование фото"
+        current_cost = photo_cost
+        instruction = (
+            "📸 Отправь *фото с подписью*.\n"
+            "В подписи напиши, что нужно изменить."
+        )
+    else:
+        current_mode = "Генерация по тексту"
+        current_cost = prompt_cost
+        instruction = "✍️ Просто отправь текстовый запрос одним сообщением."
+
+    return (
+        f"🍌 *Nano Banana*\n\n"
+        f"Текущая модель: *{model_name}*\n"
+        f"Текущий режим: *{current_mode}*\n"
+        f"Стоимость: *{current_cost}* {TOKEN_EMOJI}\n"
+        f"{balance_line(user_id)}\n\n"
+        f"{instruction}"
+    )
 
 
 def get_payments_keyboard():
@@ -2261,7 +2293,7 @@ def btn_nano_banana(message):
     clear_video_state(user_id)
     set_image_mode(user_id, True)
     set_image_model(user_id, DEFAULT_IMAGE_MODEL)
-    set_image_flow(user_id, "")
+    set_image_flow(user_id, "prompt_only")
     set_pending_image_prompt(user_id, "")
 
     bot.send_message(
@@ -2272,7 +2304,7 @@ def btn_nano_banana(message):
 
     bot.send_message(
         message.chat.id,
-        "Доступные действия:",
+        get_nano_mode_text(user_id),
         reply_markup=get_nano_actions_keyboard(user_id)
     )
 
@@ -2375,8 +2407,6 @@ def callback_model(call):
 def callback_image_flow(call):
     flow = call.data.split("imgflow:", 1)[1]
     user_id = call.from_user.id
-    data = get_user_data(user_id)
-    model = data["image_model"]
 
     if flow not in {"prompt_only", "photo_plus_prompt"}:
         bot.answer_callback_query(call.id, "Неизвестный режим")
@@ -2386,30 +2416,17 @@ def callback_image_flow(call):
     set_image_flow(user_id, flow)
     set_pending_image_prompt(user_id, "")
 
-    bot.answer_callback_query(call.id, "Режим выбран")
-
-    cost = get_image_cost(model, flow)
-
     if flow == "prompt_only":
-        safe_edit_message(
-            call.message.chat.id,
-            call.message.message_id,
-            f"🍌 *Генерация по тексту*\n"
-            f"Стоимость: *{cost}* {TOKEN_EMOJI}\n"
-            f"{balance_line(user_id)}\n\n"
-            f"Отправь текстовый запрос одним сообщением.",
-            reply_markup=None
-        )
+        bot.answer_callback_query(call.id, "Выбран режим: генерация по тексту")
     else:
-        safe_edit_message(
-            call.message.chat.id,
-            call.message.message_id,
-            f"🍌 *Редактирование фото*\n"
-            f"Стоимость: *{cost}* {TOKEN_EMОJI}\n"
-            f"{balance_line(user_id)}\n\n"
-            f"Отправь фото с подписью, что нужно изменить.",
-            reply_markup=None
-        )
+        bot.answer_callback_query(call.id, "Выбран режим: редактирование фото")
+
+    safe_edit_message(
+        call.message.chat.id,
+        call.message.message_id,
+        get_nano_mode_text(user_id),
+        reply_markup=get_nano_actions_keyboard(user_id)
+    )
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("payplan:"))
@@ -2583,8 +2600,9 @@ def handle_photo(message):
 
         bot.send_message(
             message.chat.id,
-            "Сейчас в Kling выбран режим генерации *по тексту*.\n"
-            "Если хочешь генерацию по фото, переключи режим в настройках Kling.",
+            "Сейчас выбран режим Kling по тексту.\n\n"
+            "Для Kling отправляй просто текстовый запрос.\n"
+            "Если хочешь режим по фото — переключи режим внутри Kling.",
             parse_mode="Markdown",
             reply_markup=get_video_mode_keyboard()
         )
@@ -2593,12 +2611,18 @@ def handle_photo(message):
     if not data["image_mode"]:
         bot.send_message(
             message.chat.id,
-            "Сначала включи режим Nano Banana кнопкой 🍌 Nano Banana или видео режим кнопкой 🎬 Kling.",
+            "Сейчас режим Nano Banana не включён.\n"
+            "Сначала выбери Nano Banana или Kling.",
             reply_markup=get_main_keyboard()
         )
         return
 
-    if data["image_flow"] != "photo_plus_prompt":
+    current_flow = data["image_flow"] or "prompt_only"
+
+    if current_flow != "photo_plus_prompt":
+        if data["image_flow"] != "prompt_only":
+            set_image_flow(message.from_user.id, "prompt_only")
+
         bot.send_message(
             message.chat.id,
             "Сейчас выбран режим генерации по тексту.\n"
@@ -2622,8 +2646,8 @@ def handle_text(message):
         if data.get("video_flow") == "photo_plus_prompt":
             bot.send_message(
                 message.chat.id,
-                "Сейчас в Kling выбран режим *по фото + описание*.\n"
-                "Отправь фото с подписью, что нужно сгенерировать.",
+                "Сейчас у Kling выбран режим *по фото + описанию*.\n\n"
+                "Отправь фото с подписью, что нужно анимировать.",
                 parse_mode="Markdown",
                 reply_markup=get_video_mode_keyboard()
             )
@@ -2633,10 +2657,15 @@ def handle_text(message):
         return
 
     if data["image_mode"]:
-        if data["image_flow"] == "prompt_only":
+        current_flow = data["image_flow"] or "prompt_only"
+
+        if current_flow == "prompt_only":
+            if data["image_flow"] != "prompt_only":
+                set_image_flow(user_id, "prompt_only")
             process_nano_prompt_only(message)
             return
-        elif data["image_flow"] == "photo_plus_prompt":
+
+        if current_flow == "photo_plus_prompt":
             bot.send_message(
                 message.chat.id,
                 "Сейчас выбран режим редактирования фото.\n"
