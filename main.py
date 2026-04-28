@@ -2717,25 +2717,26 @@ def btn_support(message):
     current_keyboard = get_current_keyboard(message.from_user.id)
 
     support_text = (
-        "🛟 Поддержка\n\n"
+        "🛟 <b>Поддержка</b>\n\n"
         "Если возникли вопросы, проблемы со списанием токенов или генерацией,\n"
         "напиши в аккаунт поддержки:\n"
-        f"@{SUPPORT_USERNAME}\n\n"
-        f"🔗 Ссылка: {SUPPORT_URL}"
+        '<a href="https://t.me/ai_patrior_support">@ai_patrior_support</a>\n\n'
+        '🔗 Ссылка: <a href="https://t.me/ai_patrior_support">https://t.me/ai_patrior_support</a>'
     )
 
     inline_kb = types.InlineKeyboardMarkup()
     inline_kb.add(
         types.InlineKeyboardButton(
             "Перейти в поддержку",
-            url=SUPPORT_URL
+            url="https://t.me/ai_patrior_support"
         )
     )
 
     bot.send_message(
         message.chat.id,
         support_text,
-        parse_mode=None,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
         reply_markup=inline_kb
     )
 
