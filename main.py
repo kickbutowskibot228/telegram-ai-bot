@@ -134,6 +134,7 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
+    # users
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -183,6 +184,7 @@ def init_db():
     if "last_free_reset_at" not in existing_columns:
         cur.execute("ALTER TABLE users ADD COLUMN last_free_reset_at TEXT DEFAULT NULL")
 
+    # payments
     cur.execute("""
         CREATE TABLE IF NOT EXISTS payments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -197,6 +199,7 @@ def init_db():
         )
     """)
 
+    # chat_history
     cur.execute("""
         CREATE TABLE IF NOT EXISTS chat_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -207,10 +210,7 @@ def init_db():
         )
     """)
 
-    conn.commit()
-    conn.close()
-
-
+    # generation_jobs — ВАЖНО: тоже до conn.close()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS generation_jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -232,6 +232,9 @@ def init_db():
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    conn.commit()
+    conn.close()
 
 
 def ensure_user(user_id: int):
