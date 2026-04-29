@@ -2719,9 +2719,8 @@ def btn_support(message):
     support_text = (
         "🛟 <b>Поддержка</b>\n\n"
         "Если возникли вопросы, проблемы со списанием токенов или генерацией,\n"
-        "напиши в аккаунт поддержки:\n"
+        "напишите в аккаунт поддержки:\n"
         '<a href="https://t.me/ai_patriot_support">@ai_patriot_support</a>\n\n'
-        '🔗 Ссылка: <a href="https://t.me/ai_patriot_support">https://t.me/ai_patriot_support</a>'
     )
 
     inline_kb = types.InlineKeyboardMarkup()
