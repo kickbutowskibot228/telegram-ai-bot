@@ -1015,7 +1015,7 @@ def getklingvideokeyboard(userid: int):
     model = data["videomodel"]
     duration = data["videoduration"]
     aspectratio = data["videoaspectratio"]
-    cost = getvideocost(model, duration)
+    cost = getvideocostmodel(model, duration)
 
     kb = types.InlineKeyboardMarkup()
 
@@ -1856,7 +1856,7 @@ def processklingmessage(message):
         return
 
     flow = "photoplusprompt" if has_photo else "promptonly"
-    cost = getvideocost(model, duration)
+    cost = getvideocostmodel(model, duration)
     totaltokens = gettotaltokens(userid)
 
     if totaltokens < cost:
@@ -2547,7 +2547,7 @@ def callbackvideoduration(call):
             f"🎬 Kling Video\n\n"
             f"Длительность: {data['videoduration']} сек\n"
             f"Формат: {data['videoaspectratio']}\n"
-            f"Стоимость: {getvideocost(data['videomodel'], data['videoduration'])} {TOKEN_EMOJI}\n"
+            f"Стоимость: {getvideocostmodel(data['videomodel'], data['videoduration'])} {TOKEN_EMOJI}\n"
             f"Баланс: {balanceline(userid)}\n\n"
             f"Отправь текстовый промт или фото с подписью."
         ),
@@ -2575,7 +2575,7 @@ def callbackvideoaspect(call):
             f"🎬 Kling Video\n\n"
             f"Длительность: {data['videoduration']} сек\n"
             f"Формат: {data['videoaspectratio']}\n"
-            f"Стоимость: {getvideocost(data['videomodel'], data['videoduration'])} {TOKEN_EMOJI}\n"
+            f"Стоимость: {getvideocostmodel(data['videomodel'], data['videoduration'])} {TOKEN_EMOJI}\n"
             f"Баланс: {balanceline(userid)}\n\n"
             f"Отправь текстовый промт или фото с подписью."
         ),
@@ -2597,7 +2597,7 @@ def callbackvideohelpcall(call):
             f"🎬 Kling Video\n\n"
             f"Длительность: {data['videoduration']} сек\n"
             f"Формат: {data['videoaspectratio']}\n"
-            f"Стоимость: {getvideocost(data['videomodel'], data['videoduration'])} {TOKEN_EMOJI}\n"
+            f"Стоимость: {getvideocostmodel(data['videomodel'], data['videoduration'])} {TOKEN_EMOJI}\n"
             f"Баланс: {balanceline(userid)}\n\n"
             f"Отправь текстовый промт или фото с подписью."
         ),
