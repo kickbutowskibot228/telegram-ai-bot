@@ -13,7 +13,6 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from telebot.handler_backends import ExceptionHandler
 from datetime import datetime, timedelta
 from flask import Flask, request, abort
 from telebot import types
@@ -78,18 +77,12 @@ OPENROUTER_HEADERS = {
     "Content-Type": "application/json"
 }
 
-class BotExceptionHandler(ExceptionHandler):
-    def handle(self, exception):
-        logger.exception("Ошибка в обработчике Telegram: %s", exception)
-        return True
-
 
 bot = telebot.TeleBot(
     TELEGRAM_TOKEN,
     parse_mode="Markdown",
     threaded=True,
-    num_threads=16,
-    exception_handler=BotExceptionHandler()
+    num_threads=16
 )
 
 app = Flask(__name__)
