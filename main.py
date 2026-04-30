@@ -2380,33 +2380,24 @@ def btnklingvideomessage(message):
     setvideomode(userid, True)
     setvideomodel(userid, DEFAULTVIDEOMODEL)
     setvideoduration(userid, DEFAULTVIDEODURATION)
-    setvideoaspectratio(userid, DEFAULTVIDEOASPECTRATIO)
+    setvideoaspectratiouserid(userid, DEFAULTVIDEOASPECTRATIO)
 
     modelname = VIDEOMODELS[DEFAULTVIDEOMODEL]
-    cost = getvideocost(DEFAULTVIDEOMODEL, DEFAULTVIDEODURATION)
+    cost = getvideocostmodel(DEFAULTVIDEOMODEL, DEFAULTVIDEODURATION)
 
     bot.send_message(
         message.chat.id,
         (
-            f"🎬 *Kling Video*\n\n"
+            f"🎬 Kling Video\n\n"
             f"Модель: {modelname}\n"
-            f"Длительность: {DEFAULTVIDEОДURATION} сек\n"
+            f"Длительность: {DEFAULTVIDEODURATION} сек\n"
             f"Формат: {DEFAULTVIDEOASPECTRATIO}\n"
-            f"Стоимость: {cost} {TOKEN_EMOJI}\n"
+            f"Стоимость: {cost} {TOKENEMOJI}\n"
             f"Баланс: {balanceline(userid)}\n\n"
-            f"Отправь:\n"
-            f"- текстовый промт, или\n"
-            f"- фото с подписью.\n\n"
-            f"Я сам определю режим генерации."
+            f"Отправь текстовый промт или фото с подписью."
         ),
-        parse_mode="Markdown",
+        parse_mode=None,
         reply_markup=getklingvideokeyboard(userid)
-    )
-
-    bot.send_message(
-        message.chat.id,
-        "⚙️ Настройки видео:",
-        reply_markup=get_kling_video_keyboard(user_id)
     )
 
 @bot.message_handler(func=lambda m: m.text == BTN_TOPUP)
