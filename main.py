@@ -3124,15 +3124,26 @@ def handle_text(message):
     process_text_question(message)
 
 
+def process_update_safe(update):
+    try:
+        bot.process_new_updates([update])
+    except Exception as e:
+        logger.exception("Ошибка обработки update: %s", e)
+
+
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
-    if request.is_json:
+    if not request.is_json:
+        abort(403)
+
+    try:
         json_str = request.get_data().decode("utf-8")
         update = telebot.types.Update.de_json(json_str)
         WEBHOOK_EXECUTOR.submit(process_update_safe, update)
-        return "ok"
-
-    abort(403)
+        return "ok", 200
+    except Exception as e:
+        logger.exception("Ошибка в webhook: %s", e)
+        return "error", 500
 
 
 @app.route("/", methods=["GET"])
@@ -3146,7 +3157,14 @@ def setup_webhook():
         bot.remove_webhook()
         time.sleep(1)
         bot.set_webhook(url=webhook_url)
-        logger.info("Webhook установлен: %s", webhook_url)
+
+        info = bot.get_webhook_info()
+        logger.info(
+            "Webhook установлен: %s | pending=%s | last_error=%s",
+            info.url,
+            info.pending_update_count,
+            info.last_error_message
+        )
     else:
         logger.warning("RENDER_EXTERNAL_HOSTNAME не задан, webhook не будет установлен")
 
