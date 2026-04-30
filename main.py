@@ -9,6 +9,11 @@ import mimetypes
 import requests
 import telebot
 
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from telebot.handler_backends import ExceptionHandler
 from datetime import datetime, timedelta
 from flask import Flask, request, abort
 from telebot import types
@@ -48,8 +53,48 @@ if not TELEGRAM_TOKEN:
 if not OPENROUTER_API_KEY:
     raise RuntimeError("Не задан OPENROUTER_API_KEY")
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown")
+HTTP = requests.Session()
+
+retry = Retry(
+    total=2,
+    connect=2,
+    read=2,
+    backoff_factor=0.5,
+    status_forcelist=(429, 500, 502, 503, 504),
+    allowed_methods=frozenset(["GET", "POST"])
+)
+
+adapter = HTTPAdapter(
+    pool_connections=50,
+    pool_maxsize=50,
+    max_retries=retry
+)
+
+HTTP.mount("https://", adapter)
+HTTP.mount("http://", adapter)
+
+OPENROUTER_HEADERS = {
+    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+    "Content-Type": "application/json"
+}
+
+class BotExceptionHandler(ExceptionHandler):
+    def handle(self, exception):
+        logger.exception("Ошибка в обработчике Telegram: %s", exception)
+        return True
+
+
+bot = telebot.TeleBot(
+    TELEGRAM_TOKEN,
+    parse_mode="Markdown",
+    threaded=True,
+    num_threads=16,
+    exception_handler=BotExceptionHandler()
+)
+
 app = Flask(__name__)
+WEBHOOK_EXECUTOR = ThreadPoolExecutor(max_workers=8)
+
 
 DB_PATH = "bot.db"
 FREE_TOKENS = 40
@@ -130,9 +175,28 @@ PAY_PLANS = {
 }
 
 
+@contextmanager
+def db_connection(commit=False):
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.execute("PRAGMA busy_timeout = 30000")
+
+    try:
+        yield conn
+        if commit:
+            conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+    cur.execute("PRAGMA journal_mode=WAL")
+    cur.execute("PRAGMA synchronous=NORMAL")
+    cur.execute("PRAGMA busy_timeout=30000")
 
     # users
     cur.execute("""
@@ -233,20 +297,29 @@ def init_db():
         )
     """)
 
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_chat_history_user_id_id
+        ON chat_history(user_id, id)
+    """)
+
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_generation_jobs_user_status
+        ON generation_jobs(user_id, status)
+    """)
+
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_payments_status
+        ON payments(status)
+    """)
+
     conn.commit()
     conn.close()
 
 
 def ensure_user(user_id: int):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-
-    cur.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
-    row = cur.fetchone()
-
-    if not row:
-        cur.execute("""
-            INSERT INTO users (
+    with db_connection(commit=True) as conn:
+        conn.execute("""
+            INSERT OR IGNORE INTO users (
                 user_id, model, free_tokens, paid_tokens,
                 image_mode, image_model, image_flow, pending_image_prompt,
                 video_mode, video_model, video_flow, video_duration, video_aspect_ratio,
@@ -630,57 +703,51 @@ def clear_chat_history(user_id: int):
 def consume_tokens(user_id: int, cost: int):
     ensure_user(user_id)
 
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
+    if cost <= 0:
+        return True, "free", 0
 
-    cur.execute("""
-        SELECT free_tokens, paid_tokens
-        FROM users
-        WHERE user_id = ?
-    """, (user_id,))
-    row = cur.fetchone()
+    with db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
 
-    if not row:
-        conn.close()
-        return False, None, cost
-
-    free_tokens, paid_tokens = row
-    total = free_tokens + paid_tokens
-
-    if total < cost:
-        conn.close()
-        return False, "limit", cost
-
-    if paid_tokens >= cost:
         cur.execute("""
-            UPDATE users
-            SET paid_tokens = paid_tokens - ?
+            SELECT free_tokens, paid_tokens
+            FROM users
             WHERE user_id = ?
-        """, (cost, user_id))
-        conn.commit()
-        conn.close()
-        return True, "paid", cost
+        """, (user_id,))
+        row = cur.fetchone()
 
-    if paid_tokens > 0:
-        remaining_cost = cost - paid_tokens
+        if not row:
+            conn.rollback()
+            return False, None, cost
+
+        free_tokens, paid_tokens = row
+        total = free_tokens + paid_tokens
+
+        if total < cost:
+            conn.rollback()
+            return False, "limit", cost
+
+        paid_used = min(paid_tokens, cost)
+        free_used = cost - paid_used
+
         cur.execute("""
             UPDATE users
-            SET paid_tokens = 0,
+            SET paid_tokens = paid_tokens - ?,
                 free_tokens = free_tokens - ?
             WHERE user_id = ?
-        """, (remaining_cost, user_id))
-        conn.commit()
-        conn.close()
-        return True, "mixed", cost
+        """, (paid_used, free_used, user_id))
 
-    cur.execute("""
-        UPDATE users
-        SET free_tokens = free_tokens - ?
-        WHERE user_id = ?
-    """, (cost, user_id))
-    conn.commit()
-    conn.close()
-    return True, "free", cost
+        conn.commit()
+
+    if paid_used == cost:
+        source = "paid"
+    elif paid_used > 0:
+        source = "mixed"
+    else:
+        source = "free"
+
+    return True, source, cost
 
 
 def refund_tokens(user_id: int, amount: int):
@@ -1067,9 +1134,9 @@ def format_balance_text(user_id: int):
 
 
 def safe_edit_message(chat_id, message_id, text, reply_markup=None):
-    try:
-        inline_markup = reply_markup if isinstance(reply_markup, types.InlineKeyboardMarkup) else None
+    inline_markup = reply_markup if isinstance(reply_markup, types.InlineKeyboardMarkup) else None
 
+    try:
         bot.edit_message_text(
             text=text,
             chat_id=chat_id,
@@ -1077,14 +1144,31 @@ def safe_edit_message(chat_id, message_id, text, reply_markup=None):
             parse_mode="Markdown",
             reply_markup=inline_markup
         )
+        return
     except Exception as e:
-        logger.warning("Не удалось отредактировать сообщение: %s", e)
+        logger.warning("Не удалось отредактировать Markdown-сообщение: %s", e)
+
+    try:
+        bot.edit_message_text(
+            text=text,
+            chat_id=chat_id,
+            message_id=message_id,
+            parse_mode=None,
+            reply_markup=inline_markup
+        )
+        return
+    except Exception as e:
+        logger.warning("Не удалось отредактировать plain-сообщение: %s", e)
+
+    try:
         bot.send_message(
             chat_id,
             text,
-            parse_mode="Markdown",
+            parse_mode=None,
             reply_markup=reply_markup
         )
+    except Exception as e:
+        logger.exception("Не удалось отправить fallback-сообщение: %s", e)
 
 
 def _extract_retry_after_seconds(error: Exception) -> int | None:
@@ -2542,7 +2626,7 @@ def cmd_addtokens(message):
     bot.send_message(
         message.chat.id,
         f"✅ Пользователю `{target_user_id}` начислено *{amount}* {TOKEN_EMOJI}\n"
-        f"💰 Новый баланс: *{total_tokens}* {TOKEN_EMОJI}",
+        f"💰 Новый баланс: *{total_tokens}* {TOKEN_EMOJI}",
         parse_mode="Markdown"
     )
 
@@ -3049,13 +3133,13 @@ def handle_text(message):
 
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
-    if request.headers.get("content-type") == "application/json":
+    if request.is_json:
         json_str = request.get_data().decode("utf-8")
         update = telebot.types.Update.de_json(json_str)
-        bot.process_new_updates([update])
-        return ""
-    else:
-        abort(403)
+        WEBHOOK_EXECUTOR.submit(process_update_safe, update)
+        return "ok"
+
+    abort(403)
 
 
 @app.route("/", methods=["GET"])
