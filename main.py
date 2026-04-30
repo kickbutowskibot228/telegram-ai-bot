@@ -70,7 +70,6 @@ BTN_VIDEO = "🎬 Kling"
 BTN_BALANCE = "📊 Баланс"
 BTN_TOPUP = "💳 Пополнение"
 BTN_RESET = "🔄 Сброс"
-BTN_EXIT = "❌ Выйти из режима"
 BTN_SUPPORT = "🛟 Поддержка"
 
 SUPPORT_USERNAME = "ai_patriot_support"
@@ -908,15 +907,17 @@ def get_image_mode_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row(BTN_NANO)
     kb.row(BTN_BALANCE, BTN_TOPUP)
-    kb.row(BTN_EXIT, BTN_RESET)
+    kb.row(BTN_SUPPORT, BTN_RESET)
     return kb
+
 
 def get_video_mode_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row(BTN_VIDEO)
     kb.row(BTN_BALANCE, BTN_TOPUP)
-    kb.row(BTN_EXIT, BTN_RESET)
+    kb.row(BTN_SUPPORT, BTN_RESET)
     return kb
+
 
 def get_current_keyboard(user_id: int):
     data = get_user_data(user_id)
@@ -2190,17 +2191,6 @@ def btn_nano_banana(message):
     )
 
 
-@bot.message_handler(func=lambda m: m.text == BTN_EXIT)
-def btn_exit_mode(message):
-    user_id = message.from_user.id
-    clear_image_state(user_id)
-    clear_video_state(user_id)
-
-    bot.send_message(
-        message.chat.id,
-        "✅ Режим изображений/видео выключен.\nТеперь бот снова работает как обычный чат.",
-        reply_markup=get_main_keyboard()
-    )
 
 @bot.message_handler(func=lambda m: m.text == BTN_VIDEO)
 def btn_kling_video(message):
