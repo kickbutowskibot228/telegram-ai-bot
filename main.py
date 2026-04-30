@@ -9,10 +9,6 @@ import mimetypes
 import requests
 import telebot
 
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from datetime import datetime, timedelta
 from flask import Flask, request, abort
 from telebot import types
@@ -52,42 +48,8 @@ if not TELEGRAM_TOKEN:
 if not OPENROUTER_API_KEY:
     raise RuntimeError("Не задан OPENROUTER_API_KEY")
 
-HTTP = requests.Session()
-
-retry = Retry(
-    total=2,
-    connect=2,
-    read=2,
-    backoff_factor=0.5,
-    status_forcelist=(429, 500, 502, 503, 504),
-    allowed_methods=frozenset(["GET", "POST"])
-)
-
-adapter = HTTPAdapter(
-    pool_connections=50,
-    pool_maxsize=50,
-    max_retries=retry
-)
-
-HTTP.mount("https://", adapter)
-HTTP.mount("http://", adapter)
-
-OPENROUTER_HEADERS = {
-    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-    "Content-Type": "application/json"
-}
-
-
-bot = telebot.TeleBot(
-    TELEGRAM_TOKEN,
-    parse_mode="Markdown",
-    threaded=True,
-    num_threads=16
-)
-
+bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown")
 app = Flask(__name__)
-WEBHOOK_EXECUTOR = ThreadPoolExecutor(max_workers=8)
-
 
 DB_PATH = "bot.db"
 FREE_TOKENS = 40
@@ -168,28 +130,9 @@ PAY_PLANS = {
 }
 
 
-@contextmanager
-def db_connection(commit=False):
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.execute("PRAGMA busy_timeout = 30000")
-
-    try:
-        yield conn
-        if commit:
-            conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("PRAGMA journal_mode=WAL")
-    cur.execute("PRAGMA synchronous=NORMAL")
-    cur.execute("PRAGMA busy_timeout=30000")
 
     # users
     cur.execute("""
@@ -290,29 +233,20 @@ def init_db():
         )
     """)
 
-    cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_chat_history_user_id_id
-        ON chat_history(user_id, id)
-    """)
-
-    cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_generation_jobs_user_status
-        ON generation_jobs(user_id, status)
-    """)
-
-    cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_payments_status
-        ON payments(status)
-    """)
-
     conn.commit()
     conn.close()
 
 
 def ensure_user(user_id: int):
-    with db_connection(commit=True) as conn:
-        conn.execute("""
-            INSERT OR IGNORE INTO users (
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    cur.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+    row = cur.fetchone()
+
+    if not row:
+        cur.execute("""
+            INSERT INTO users (
                 user_id, model, free_tokens, paid_tokens,
                 image_mode, image_model, image_flow, pending_image_prompt,
                 video_mode, video_model, video_flow, video_duration, video_aspect_ratio,
@@ -696,51 +630,57 @@ def clear_chat_history(user_id: int):
 def consume_tokens(user_id: int, cost: int):
     ensure_user(user_id)
 
-    if cost <= 0:
-        return True, "free", 0
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
 
-    with db_connection() as conn:
-        cur = conn.cursor()
-        cur.execute("BEGIN IMMEDIATE")
+    cur.execute("""
+        SELECT free_tokens, paid_tokens
+        FROM users
+        WHERE user_id = ?
+    """, (user_id,))
+    row = cur.fetchone()
 
-        cur.execute("""
-            SELECT free_tokens, paid_tokens
-            FROM users
-            WHERE user_id = ?
-        """, (user_id,))
-        row = cur.fetchone()
+    if not row:
+        conn.close()
+        return False, None, cost
 
-        if not row:
-            conn.rollback()
-            return False, None, cost
+    free_tokens, paid_tokens = row
+    total = free_tokens + paid_tokens
 
-        free_tokens, paid_tokens = row
-        total = free_tokens + paid_tokens
+    if total < cost:
+        conn.close()
+        return False, "limit", cost
 
-        if total < cost:
-            conn.rollback()
-            return False, "limit", cost
-
-        paid_used = min(paid_tokens, cost)
-        free_used = cost - paid_used
-
+    if paid_tokens >= cost:
         cur.execute("""
             UPDATE users
-            SET paid_tokens = paid_tokens - ?,
+            SET paid_tokens = paid_tokens - ?
+            WHERE user_id = ?
+        """, (cost, user_id))
+        conn.commit()
+        conn.close()
+        return True, "paid", cost
+
+    if paid_tokens > 0:
+        remaining_cost = cost - paid_tokens
+        cur.execute("""
+            UPDATE users
+            SET paid_tokens = 0,
                 free_tokens = free_tokens - ?
             WHERE user_id = ?
-        """, (paid_used, free_used, user_id))
-
+        """, (remaining_cost, user_id))
         conn.commit()
+        conn.close()
+        return True, "mixed", cost
 
-    if paid_used == cost:
-        source = "paid"
-    elif paid_used > 0:
-        source = "mixed"
-    else:
-        source = "free"
-
-    return True, source, cost
+    cur.execute("""
+        UPDATE users
+        SET free_tokens = free_tokens - ?
+        WHERE user_id = ?
+    """, (cost, user_id))
+    conn.commit()
+    conn.close()
+    return True, "free", cost
 
 
 def refund_tokens(user_id: int, amount: int):
@@ -1001,6 +941,61 @@ def get_models_keyboard():
     return kb
 
 
+def get_nano_actions_keyboard(user_id: int):
+    data = get_user_data(user_id)
+    image_model = data["image_model"]
+    image_flow = data["image_flow"] or "prompt_only"
+
+    prompt_cost = PROMPT_ONLY_COSTS.get(image_model, 1)
+    photo_cost = PHOTO_PROMPT_COSTS.get(image_model, 1)
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(
+        types.InlineKeyboardButton(
+            f"{'✅ ' if image_flow == 'prompt_only' else ''}Генерация по тексту ({prompt_cost} {TOKEN_EMOJI})",
+            callback_data="imgflow:prompt_only"
+        )
+    )
+    kb.add(
+        types.InlineKeyboardButton(
+            f"{'✅ ' if image_flow == 'photo_plus_prompt' else ''}Редактирование фото ({photo_cost} {TOKEN_EMOJI})",
+            callback_data="imgflow:photo_plus_prompt"
+        )
+    )
+    return kb
+
+
+def get_nano_mode_text(user_id: int):
+    data = get_user_data(user_id)
+    image_model = data["image_model"]
+    image_flow = data["image_flow"] or "prompt_only"
+
+    model_name = IMAGE_MODELS.get(image_model, image_model)
+    prompt_cost = PROMPT_ONLY_COSTS.get(image_model, 1)
+    photo_cost = PHOTO_PROMPT_COSTS.get(image_model, 1)
+
+    if image_flow == "photo_plus_prompt":
+        current_mode = "Редактирование фото"
+        current_cost = photo_cost
+        instruction = (
+            "📸 Отправь *фото с подписью*.\n"
+            "В подписи напиши, что нужно изменить."
+        )
+    else:
+        current_mode = "Генерация по тексту"
+        current_cost = prompt_cost
+        instruction = "✍️ Просто отправь текстовый запрос одним сообщением."
+
+    return (
+        f"🍌 *Nano Banana*\n\n"
+        f"Текущая модель: *{model_name}*\n"
+        f"Текущий режим: *{current_mode}*\n"
+        f"Стоимость: *{current_cost}* {TOKEN_EMOJI}\n"
+        f"{balance_line(user_id)}\n\n"
+        f"{instruction}"
+    )
+
+
 def get_payments_keyboard():
     kb = types.InlineKeyboardMarkup()
     for plan_key, plan in PAY_PLANS.items():
@@ -1010,47 +1005,60 @@ def get_payments_keyboard():
         ))
     return kb
 
-def getklingvideokeyboard(userid: int):
-    data = getuserdata(userid)
-    model = data["videomodel"]
-    duration = data["videoduration"]
-    aspectratio = data["videoaspectratio"]
-    cost = getvideocostmodel(model, duration)
+def get_kling_video_keyboard(user_id: int):
+    data = get_user_data(user_id)
+    model = data["video_model"]
+    duration = data["video_duration"]
+    aspect_ratio = data["video_aspect_ratio"]
+    flow = data["video_flow"]
+    cost = get_video_cost(model, duration)
 
     kb = types.InlineKeyboardMarkup()
 
     kb.row(
         types.InlineKeyboardButton(
-            f"{'✅ ' if duration == 5 else ''}5 сек",
-            callback_data="videoduration5"
+            f"{'✅ ' if flow == 'prompt_only' else ''}По тексту",
+            callback_data="videoflow:prompt_only"
         ),
         types.InlineKeyboardButton(
-            f"{'✅ ' if duration == 10 else ''}10 сек",
-            callback_data="videoduration10"
-        ),
+            f"{'✅ ' if flow == 'photo_plus_prompt' else ''}По фото+описанию",
+            callback_data="videoflow:photo_plus_prompt"
+        )
     )
 
     kb.row(
         types.InlineKeyboardButton(
-            f"{'✅ ' if aspectratio == '169' else ''}16:9",
-            callback_data="videoaspect169"
+            f"{'✅ ' if duration == 5 else ''}5с",
+            callback_data="videoduration:5"
         ),
         types.InlineKeyboardButton(
-            f"{'✅ ' if aspectratio == '916' else ''}9:16",
-            callback_data="videoaspect916"
+            f"{'✅ ' if duration == 10 else ''}10с",
+            callback_data="videoduration:10"
+        )
+    )
+
+    kb.row(
+        types.InlineKeyboardButton(
+            f"{'✅ ' if aspect_ratio == '16:9' else ''}16:9",
+            callback_data="videoaspect:16:9"
         ),
         types.InlineKeyboardButton(
-            f"{'✅ ' if aspectratio == '11' else ''}1:1",
-            callback_data="videoaspect11"
+            f"{'✅ ' if aspect_ratio == '9:16' else ''}9:16",
+            callback_data="videoaspect:9:16"
         ),
+        types.InlineKeyboardButton(
+            f"{'✅ ' if aspect_ratio == '1:1' else ''}1:1",
+            callback_data="videoaspect:1:1"
+        )
     )
 
     kb.add(
         types.InlineKeyboardButton(
-            f"ℹ️ Стоимость: {cost} {TOKEN_EMOJI}",
-            callback_data="videohelpshow"
+            f"🎬 Начать ({cost} {TOKEN_EMOJI})",
+            callback_data="videohelp:show"
         )
     )
+
     return kb
 
 
@@ -1059,9 +1067,9 @@ def format_balance_text(user_id: int):
 
 
 def safe_edit_message(chat_id, message_id, text, reply_markup=None):
-    inline_markup = reply_markup if isinstance(reply_markup, types.InlineKeyboardMarkup) else None
-
     try:
+        inline_markup = reply_markup if isinstance(reply_markup, types.InlineKeyboardMarkup) else None
+
         bot.edit_message_text(
             text=text,
             chat_id=chat_id,
@@ -1069,31 +1077,14 @@ def safe_edit_message(chat_id, message_id, text, reply_markup=None):
             parse_mode="Markdown",
             reply_markup=inline_markup
         )
-        return
     except Exception as e:
-        logger.warning("Не удалось отредактировать Markdown-сообщение: %s", e)
-
-    try:
-        bot.edit_message_text(
-            text=text,
-            chat_id=chat_id,
-            message_id=message_id,
-            parse_mode=None,
-            reply_markup=inline_markup
-        )
-        return
-    except Exception as e:
-        logger.warning("Не удалось отредактировать plain-сообщение: %s", e)
-
-    try:
+        logger.warning("Не удалось отредактировать сообщение: %s", e)
         bot.send_message(
             chat_id,
             text,
-            parse_mode=None,
+            parse_mode="Markdown",
             reply_markup=reply_markup
         )
-    except Exception as e:
-        logger.exception("Не удалось отправить fallback-сообщение: %s", e)
 
 
 def _extract_retry_after_seconds(error: Exception) -> int | None:
@@ -1650,435 +1641,728 @@ def process_text_question(message):
     )
 
 
-def processnanomessage(message):
-    userid = message.from_user.id
-    data = getuserdata(userid)
+def process_nano_prompt_only(message):
+    user_id = message.from_user.id
+    data = get_user_data(user_id)
+    model = data["image_model"]
+    model_name = IMAGE_MODELS.get(model, model)
+    cost = get_image_cost(model, "prompt_only")
+    total_tokens = get_total_tokens(user_id)
 
-    model = data["imagemodel"]
-    modelname = IMAGEMODELS.get(model, model)
-
-    has_photo = bool(getattr(message, "photo", None))
-    prompttext = (message.caption if has_photo else (message.text or "")).strip()
-
-    if not prompttext:
+    if total_tokens < cost:
         bot.send_message(
             message.chat.id,
-            "Нужен промт. Отправь текст или фото с подписью.",
-            reply_markup=getimagemodekeyboard()
+            f"❌ Недостаточно токенов для *{model_name}*.\n\n"
+            f"Стоимость генерации: *{cost}* {TOKEN_EMOJI}\n"
+            f"💰 Твой баланс: *{total_tokens}* {TOKEN_EMOJI}",
+            reply_markup=get_image_mode_keyboard()
         )
         return
 
-    flow = "photoplusprompt" if has_photo else "promptonly"
-    cost = getimagecost(model, flow)
-    totaltokens = gettotaltokens(userid)
-
-    if totaltokens < cost:
+    prompt_text = (message.text or "").strip()
+    if not prompt_text:
         bot.send_message(
             message.chat.id,
-            f"{modelname}.\nНужно: {cost} {TOKEN_EMOJI}\nУ тебя: {totaltokens} {TOKEN_EMOJI}",
-            reply_markup=getimagemodekeyboard()
+            "Напиши текстовый запрос одним сообщением.",
+            reply_markup=get_image_mode_keyboard()
         )
         return
 
-    jobuuid = creategenerationjob(
-        userid=userid,
+    job_uuid = create_generation_job(
+        user_id=user_id,
         provider="openrouter",
         kind="image",
         model=model,
-        flow=flow,
-        prompttext=prompttext,
+        flow="prompt_only",
+        prompt_text=prompt_text,
         cost=cost
     )
 
-    waitmsg = bot.send_message(
+    wait_msg = bot.send_message(
         message.chat.id,
-        f"{modelname} генерирует изображение..."
+        f"🍌 Генерирую изображение через *{model_name}*...\n"
+        f"Режим: *Генерация по запросу (Текст)*"
     )
 
-    inputimagedataurl = None
-    if has_photo:
-        try:
-            inputimagedataurl = telegramphototodataurl(message)
-        except Exception as e:
-            logger.exception("Telegram photo error: %s", e)
-            updategenerationjob(jobuuid, {
-                "status": "failed",
-                "errortext": f"telegramphotofailed: {e}"
-            })
-            safeeditmessage(
-                message.chat.id,
-                waitmsg.message_id,
-                "Не удалось обработать фото из Telegram.",
-                replymarkup=None
-            )
-            bot.send_message(
-                message.chat.id,
-                "Попробуй отправить фото ещё раз.",
-                reply_markup=getimagemodekeyboard()
-            )
-            return
-
-    result = generateimageopenrouter(
-        model=model,
-        prompttext=prompttext,
-        inputimagedataurl=inputimagedataurl
-    )
+    result = generate_image_openrouter(model=model, prompt_text=prompt_text)
 
     if not result["ok"]:
-        updategenerationjob(jobuuid, {
-            "status": "failed",
-            "errortext": result["error"]
-        })
-        safeeditmessage(
+        update_generation_job(job_uuid, status="failed", error_text=result["error"])
+        safe_edit_message(
             message.chat.id,
-            waitmsg.message_id,
+            wait_msg.message_id,
             result["error"],
-            replymarkup=None
+            reply_markup=None
         )
         bot.send_message(
             message.chat.id,
-            "Генерация не удалась.",
-            reply_markup=getimagemodekeyboard()
+            "Доступные действия:",
+            reply_markup=get_image_mode_keyboard()
         )
         return
 
-    filepath = savegeneratedimagefromdataurl(
-        result["imagedataurl"],
-        prefix="photo" if has_photo else "prompt"
-    )
-
-    if not filepath:
-        updategenerationjob(jobuuid, {
-            "status": "failed",
-            "errortext": "savefailed"
-        })
-        safeeditmessage(
+    file_path = save_generated_image_from_data_url(result["image_data_url"], prefix="prompt")
+    if not file_path:
+        update_generation_job(job_uuid, status="failed", error_text="save_failed")
+        safe_edit_message(
             message.chat.id,
-            waitmsg.message_id,
-            "Не удалось сохранить изображение.",
-            replymarkup=None
+            wait_msg.message_id,
+            "❌ Не удалось сохранить сгенерированное изображение.",
+            reply_markup=None
         )
         bot.send_message(
             message.chat.id,
-            "Ошибка сохранения результата.",
-            reply_markup=getimagemodekeyboard()
+            "Доступные действия:",
+            reply_markup=get_image_mode_keyboard()
         )
         return
 
-    updategenerationjob(jobuuid, {
-        "status": "completed",
-        "filepath": filepath
-    })
+    update_generation_job(job_uuid, status="completed", file_path=file_path)
 
     try:
-        sendgeneratedimageboth(
-            chatid=message.chat.id,
-            filepath=filepath,
-            captionpreview=f"{modelname}",
-            captionfile=""
+        send_generated_image_both(
+            chat_id=message.chat.id,
+            file_path=file_path,
+            caption_preview=f"🍌 {model_name}\n🎨 Генерация по запросу",
+            caption_file="📎 Оригинал без сжатия"
         )
     except Exception as e:
-        logger.exception("Telegram send failed: %s", e)
-        updategenerationjob(jobuuid, {
-            "status": "failed",
-            "errortext": f"telegramsendfailed: {e}"
-        })
-        safeeditmessage(
+        logger.exception("Ошибка отправки изображения пользователю: %s", e)
+        update_generation_job(job_uuid, status="failed", error_text=f"telegram_send_failed: {e}")
+        safe_edit_message(
             message.chat.id,
-            waitmsg.message_id,
-            "Ошибка отправки результата в Telegram.",
-            replymarkup=None
+            wait_msg.message_id,
+            "❌ Изображение сгенерировано, но не удалось отправить его в Telegram. Токены не списаны.",
+            reply_markup=None
         )
         bot.send_message(
             message.chat.id,
-            "Результат не удалось отправить.",
-            reply_markup=getimagemodekeyboard()
+            "Попробуй ещё раз позже.",
+            reply_markup=get_image_mode_keyboard()
         )
         return
 
-    success, source, charged = consumetokens(userid, cost)
+    success, source, charged = consume_tokens(user_id, cost)
     if not success:
-        updategenerationjob(jobuuid, {
-            "status": "failed",
-            "errortext": "chargefailed"
-        })
-        safeeditmessage(
+        update_generation_job(job_uuid, status="failed", error_text="charge_failed")
+        safe_edit_message(
             message.chat.id,
-            waitmsg.message_id,
-            f"Не удалось списать токены.\n{balanceline(userid)}",
-            replymarkup=None
+            wait_msg.message_id,
+            f"⚠️ Изображение отправлено, но не удалось списать токены.\n\n{balance_line(user_id)}",
+            reply_markup=None
         )
         bot.send_message(
             message.chat.id,
-            "Недостаточно токенов.",
-            reply_markup=getimagemodekeyboard()
+            "Сообщи админу, если ситуация повторится.",
+            reply_markup=get_image_mode_keyboard()
         )
         return
 
-    updategenerationjob(jobuuid, {
-        "status": "delivered",
-        "charged": 1
-    })
+    update_generation_job(job_uuid, status="delivered", charged=1)
 
-    totalleft = gettotaltokens(userid)
-    safeeditmessage(
+    total_left = get_total_tokens(user_id)
+
+    safe_edit_message(
         message.chat.id,
-        waitmsg.message_id,
-        f"Готово.\nСписано: {charged} {TOKEN_EMOJI}\nОсталось: {totalleft} {TOKEN_EMOJI}",
-        replymarkup=None
+        wait_msg.message_id,
+        f"✅ Изображение готово и отправлено.\n"
+        f"💸 Списано: *{charged}* {TOKEN_EMOJI}\n"
+        f"💰 Твой баланс: *{total_left}* {TOKEN_EMOJI}",
+        reply_markup=None
     )
 
     bot.send_message(
         message.chat.id,
-        "Отправь следующий промт или фото с подписью.",
-        reply_markup=getimagemodekeyboard()
+        "Доступные действия:",
+        reply_markup=get_image_mode_keyboard()
     )
 
 
-def processklingmessage(message):
-    userid = message.from_user.id
-    userdata = getuserdata(userid)
+def process_nano_photo_plus_prompt(message):
+    user_id = message.from_user.id
+    data = get_user_data(user_id)
+    model = data["image_model"]
+    model_name = IMAGE_MODELS.get(model, model)
+    cost = get_image_cost(model, "photo_plus_prompt")
+    total_tokens = get_total_tokens(user_id)
 
-    model = userdata["videomodel"]
-    modelname = VIDEOMODELS.get(model, model)
-    duration = userdata["videoduration"]
-    aspectratio = userdata["videoaspectratio"]
-
-    has_photo = bool(getattr(message, "photo", None))
-    prompttext = (message.caption if has_photo else (message.text or "")).strip()
-
-    if not prompttext:
+    if total_tokens < cost:
         bot.send_message(
             message.chat.id,
-            "Нужен промт. Отправь текст или фото с подписью.",
-            reply_markup=getvideomodekeyboard()
+            f"❌ Недостаточно токенов для *{model_name}*.\n\n"
+            f"Стоимость редактирования: *{cost}* {TOKEN_EMOJI}\n"
+            f"💰 Твой баланс: *{total_tokens}* {TOKEN_EMOJI}",
+            reply_markup=get_image_mode_keyboard()
         )
         return
 
-    flow = "photoplusprompt" if has_photo else "promptonly"
-    cost = getvideocostmodel(model, duration)
-    totaltokens = gettotaltokens(userid)
-
-    if totaltokens < cost:
+    prompt_text = (message.caption or "").strip()
+    if not prompt_text:
         bot.send_message(
             message.chat.id,
-            f"{modelname}.\nНужно: {cost} {TOKEN_EMOJI}\nУ тебя: {totaltokens} {TOKEN_EMOJI}",
-            parse_mode="Markdown",
-            reply_markup=getvideomodekeyboard()
+            "🖼 Отправь фото *с подписью*, что нужно изменить.",
+            reply_markup=get_image_mode_keyboard()
         )
         return
 
-    jobuuid = creategenerationjob(
-        userid=userid,
+    job_uuid = create_generation_job(
+        user_id=user_id,
         provider="openrouter",
-        kind="video",
+        kind="image",
         model=model,
-        flow=flow,
-        prompttext=prompttext,
+        flow="photo_plus_prompt",
+        prompt_text=prompt_text,
         cost=cost
     )
 
-    waitmsg = bot.send_message(
+    wait_msg = bot.send_message(
         message.chat.id,
-        (
-            f"{modelname} генерирует видео...\n"
-            f"Длительность: {duration} сек\n"
-            f"Формат: {aspectratio}\n"
-            f"Обычно это занимает до 15 минут."
-        ),
+        f"🍌 Обрабатываю изображение через *{model_name}*...\n"
+        f"Режим: *Редактирование фото (Фото+Текст)*"
+    )
+
+    try:
+        input_image_data_url = telegram_photo_to_data_url(message)
+    except Exception as e:
+        logger.exception("Ошибка получения фото из Telegram: %s", e)
+        update_generation_job(job_uuid, status="failed", error_text=f"telegram_photo_failed: {e}")
+        safe_edit_message(
+            message.chat.id,
+            wait_msg.message_id,
+            "❌ Не удалось скачать фото из Telegram.",
+            reply_markup=None
+        )
+        bot.send_message(
+            message.chat.id,
+            "Доступные действия:",
+            reply_markup=get_image_mode_keyboard()
+        )
+        return
+
+    result = generate_image_openrouter(
+        model=model,
+        prompt_text=prompt_text,
+        input_image_data_url=input_image_data_url
+    )
+
+    if not result["ok"]:
+        update_generation_job(job_uuid, status="failed", error_text=result["error"])
+        safe_edit_message(
+            message.chat.id,
+            wait_msg.message_id,
+            result["error"],
+            reply_markup=None
+        )
+        bot.send_message(
+            message.chat.id,
+            "Доступные действия:",
+            reply_markup=get_image_mode_keyboard()
+        )
+        return
+
+    file_path = save_generated_image_from_data_url(result["image_data_url"], prefix="photo")
+    if not file_path:
+        update_generation_job(job_uuid, status="failed", error_text="save_failed")
+        safe_edit_message(
+            message.chat.id,
+            wait_msg.message_id,
+            "❌ Не удалось сохранить обработанное изображение.",
+            reply_markup=None
+        )
+        bot.send_message(
+            message.chat.id,
+            "Доступные действия:",
+            reply_markup=get_image_mode_keyboard()
+        )
+        return
+
+    update_generation_job(job_uuid, status="completed", file_path=file_path)
+
+    try:
+        send_generated_image_both(
+            chat_id=message.chat.id,
+            file_path=file_path,
+            caption_preview=f"🍌 {model_name}\n🖼 Редактирование фото",
+            caption_file="📎 Оригинал без сжатия"
+        )
+    except Exception as e:
+        logger.exception("Ошибка отправки обработанного изображения: %s", e)
+        update_generation_job(job_uuid, status="failed", error_text=f"telegram_send_failed: {e}")
+        safe_edit_message(
+            message.chat.id,
+            wait_msg.message_id,
+            "❌ Изображение обработано, но не удалось отправить его в Telegram. Токены не списаны.",
+            reply_markup=None
+        )
+        bot.send_message(
+            message.chat.id,
+            "Попробуй ещё раз позже.",
+            reply_markup=get_image_mode_keyboard()
+        )
+        return
+
+    success, source, charged = consume_tokens(user_id, cost)
+    if not success:
+        update_generation_job(job_uuid, status="failed", error_text="charge_failed")
+        safe_edit_message(
+            message.chat.id,
+            wait_msg.message_id,
+            f"⚠️ Изображение отправлено, но не удалось списать токены.\n\n{balance_line(user_id)}",
+            reply_markup=None
+        )
+        bot.send_message(
+            message.chat.id,
+            "Сообщи админу, если ситуация повторится.",
+            reply_markup=get_image_mode_keyboard()
+        )
+        return
+
+    update_generation_job(job_uuid, status="delivered", charged=1)
+
+    total_left = get_total_tokens(user_id)
+
+    safe_edit_message(
+        message.chat.id,
+        wait_msg.message_id,
+        f"✅ Изображение готово и отправлено.\n"
+        f"💸 Списано: *{charged}* {TOKEN_EMOJI}\n"
+        f"💰 Твой баланс: *{total_left}* {TOKEN_EMOJI}",
+        reply_markup=None
+    )
+
+    bot.send_message(
+        message.chat.id,
+        "Доступные действия:",
+        reply_markup=get_image_mode_keyboard()
+    )
+
+def process_video_prompt(message):
+    user_id = message.from_user.id
+    user_data = get_user_data(user_id)
+
+    model = user_data["video_model"]
+    model_name = VIDEO_MODELS.get(model, model)
+    flow = user_data["video_flow"] or "prompt_only"
+    duration = user_data["video_duration"]
+    aspect_ratio = user_data["video_aspect_ratio"]
+    cost = get_video_cost(model, duration)
+
+    if flow != "prompt_only":
+        bot.send_message(
+            message.chat.id,
+            "Сейчас у тебя выбран режим *по фото + описание*.\n\n"
+            "Отправь фото с подписью, что нужно сгенерировать.",
+            parse_mode="Markdown",
+            reply_markup=get_video_mode_keyboard()
+        )
+        return
+
+    prompt_text = (message.text or "").strip()
+    if not prompt_text:
+        bot.send_message(
+            message.chat.id,
+            "Напиши текстовый запрос одним сообщением.",
+            reply_markup=get_video_mode_keyboard()
+        )
+        return
+
+    total_tokens = get_total_tokens(user_id)
+    if total_tokens < cost:
+        bot.send_message(
+            message.chat.id,
+            f"❌ Недостаточно токенов для *{model_name}*.\n\n"
+            f"Стоимость генерации: *{cost}* {TOKEN_EMOJI}\n"
+            f"💰 Твой баланс: *{total_tokens}* {TOKEN_EMOJI}",
+            parse_mode="Markdown",
+            reply_markup=get_video_mode_keyboard()
+        )
+        return
+
+    job_uuid = create_generation_job(
+        user_id=user_id,
+        provider="openrouter",
+        kind="video",
+        model=model,
+        flow="prompt_only",
+        prompt_text=prompt_text,
+        cost=cost
+    )
+
+    wait_msg = bot.send_message(
+        message.chat.id,
+        f"🎬 Запускаю генерацию видео через *{model_name}*...\n"
+        f"⏱ Длительность: *{duration}с*\n"
+        f"📐 Формат: *{aspect_ratio}*\n\n"
+        f"Обычно это занимает 1–5 минут.",
         parse_mode="Markdown"
     )
 
-    inputimagedataurl = None
-    if has_photo:
-        try:
-            inputimagedataurl = telegramphototodataurl(message)
-        except Exception as e:
-            logger.exception("Kling Telegram photo error: %s", e)
-            updategenerationjob(jobuuid, {
-                "status": "failed",
-                "errortext": f"telegramphotofailed: {e}"
-            })
-            safeeditmessage(
-                message.chat.id,
-                waitmsg.message_id,
-                "Не удалось обработать фото из Telegram.",
-                replymarkup=None
-            )
-            bot.send_message(
-                message.chat.id,
-                "Попробуй отправить фото ещё раз.",
-                reply_markup=getvideomodekeyboard()
-            )
-            return
-
-    submitresult = submitopenroutervideogeneration(
+    submit_result = submit_openrouter_video_generation(
         model=model,
-        prompt=prompttext,
+        prompt=prompt_text,
         duration=duration,
-        aspectratio=aspectratio,
-        inputimagedataurl=inputimagedataurl
+        aspect_ratio=aspect_ratio,
+        input_image_data_url=None
     )
 
-    if not submitresult["ok"]:
-        updategenerationjob(jobuuid, {
-            "status": "failed",
-            "errortext": submitresult["error"]
-        })
-        safeeditmessage(
+    if not submit_result["ok"]:
+        update_generation_job(job_uuid, status="failed", error_text=submit_result["error"])
+        safe_edit_message(
             message.chat.id,
-            waitmsg.message_id,
-            f"Ошибка запуска генерации:\n{submitresult['error']}",
-            replymarkup=None
+            wait_msg.message_id,
+            f"❌ {submit_result['error']}",
+            reply_markup=None
         )
         bot.send_message(
             message.chat.id,
-            "Не удалось запустить генерацию.",
-            reply_markup=getvideomodekeyboard()
+            "Попробуй ещё раз с другим запросом.",
+            reply_markup=get_video_mode_keyboard()
         )
         return
 
-    generationid = submitresult.get("id")
-    pollingurl = submitresult.get("pollingurl")
+    generation_id = submit_result.get("id")
+    polling_url = submit_result.get("polling_url")
 
-    updategenerationjob(jobuuid, {
-        "status": "submitted",
-        "providergenerationid": generationid or "",
-        "pollingurl": pollingurl or ""
-    })
+    update_generation_job(
+        job_uuid,
+        status="submitted",
+        provider_generation_id=generation_id or "",
+        polling_url=polling_url or ""
+    )
 
-    safeeditmessage(
+    safe_edit_message(
         message.chat.id,
-        waitmsg.message_id,
-        (
-            f"Генерация запущена.\n"
-            f"Длительность: {duration} сек\n"
-            f"Формат: {aspectratio}\n"
-            f"Ожидаю результат..."
-        ),
-        replymarkup=None
+        wait_msg.message_id,
+        f"🎬 Генерация запущена.\n\n"
+        f"⏱ Длительность: *{duration}с*\n"
+        f"📐 Формат: *{aspect_ratio}*\n"
+        f"💰 Токены будут списаны только после успешной отправки результата.\n\n"
+        f"⏳ Ожидаю готовое видео...",
+        reply_markup=None
     )
 
-    if not generationid or not pollingurl:
-        updategenerationjob(jobuuid, {
-            "status": "failed",
-            "errortext": "missinggenerationidorpollingurl"
-        })
+    if not generation_id or not polling_url:
+        update_generation_job(job_uuid, status="failed", error_text="missing_generation_id_or_polling_url")
         bot.send_message(
             message.chat.id,
-            "OpenRouter не вернул generation id или polling url.",
-            reply_markup=getvideomodekeyboard()
+            "❌ OpenRouter не вернул id или polling_url для видео.",
+            reply_markup=get_video_mode_keyboard()
         )
         return
 
-    for _ in range(VIDEOPOLLMAXATTEMPTS):
-        time.sleep(VIDEOPOLLINTERVAL)
-        pollresult = pollopenroutervideo(pollingurl)
+    for _ in range(VIDEO_POLL_MAX_ATTEMPTS):
+        time.sleep(VIDEO_POLL_INTERVAL)
 
-        if not pollresult["ok"]:
+        poll_result = poll_openrouter_video(polling_url)
+        if not poll_result["ok"]:
             continue
 
-        status = pollresult.get("status")
-        updategenerationjob(jobuuid, {"status": status or "polling"})
+        status = poll_result.get("status")
+        update_generation_job(job_uuid, status=status or "polling")
 
-        if status in ("pending", "in_progress", "inprogress"):
+        if status in ("pending", "in_progress"):
             continue
 
         if status == "failed":
-            updategenerationjob(jobuuid, {
-                "status": "failed",
-                "errortext": pollresult.get("errormessage") or "videogenerationfailed"
-            })
+            update_generation_job(
+                job_uuid,
+                status="failed",
+                error_text=poll_result.get("error_message") or "video_generation_failed"
+            )
             bot.send_message(
                 message.chat.id,
-                f"Генерация завершилась ошибкой.\n{pollresult.get('errormessage') or ''}",
-                reply_markup=getvideomodekeyboard()
+                f"❌ Генерация видео завершилась ошибкой.\n\n{poll_result.get('error_message') or 'Неизвестная ошибка.'}",
+                reply_markup=get_video_mode_keyboard()
             )
             return
 
         if status == "completed":
-            filepath = downloadopenroutervideocontent(
-                generationid,
-                index=0,
-                prefix="klingphoto" if has_photo else "klingtext"
-            )
+            file_path = download_openrouter_video_content(generation_id, index=0, prefix="kling_text")
 
-            if not filepath:
-                updategenerationjob(jobuuid, {
-                    "status": "failed",
-                    "errortext": "downloadfailed"
-                })
+            if not file_path:
+                update_generation_job(job_uuid, status="failed", error_text="download_failed")
                 bot.send_message(
                     message.chat.id,
-                    "Не удалось скачать видео.",
-                    reply_markup=getvideomodekeyboard()
+                    "❌ Не удалось скачать готовое видео.",
+                    reply_markup=get_video_mode_keyboard()
                 )
                 return
 
-            updategenerationjob(jobuuid, {
-                "status": "completed",
-                "filepath": filepath
-            })
+            update_generation_job(job_uuid, status="completed", file_path=file_path)
 
             try:
-                safesendvideo(
+                safe_send_video(
                     message.chat.id,
-                    filepath,
-                    caption=f"{modelname}",
-                    parsemode="Markdown"
+                    file_path,
+                    caption=f"🎬 Видео готово\n\nМодель: *{model_name}*",
+                    parse_mode="Markdown"
                 )
-                safesenddocument(
+
+                safe_send_document(
                     message.chat.id,
-                    filepath,
-                    caption=""
+                    file_path,
+                    caption="📎 Видео файлом"
                 )
             except Exception as e:
-                logger.exception("Kling Telegram send failed: %s", e)
-                updategenerationjob(jobuuid, {
-                    "status": "failed",
-                    "errortext": f"telegramsendfailed: {e}"
-                })
+                logger.exception("Ошибка отправки видео пользователю: %s", e)
+                update_generation_job(job_uuid, status="failed", error_text=f"telegram_send_failed: {e}")
                 bot.send_message(
                     message.chat.id,
-                    "Ошибка отправки результата в Telegram.",
-                    reply_markup=getvideomodekeyboard()
+                    "❌ Видео сгенерировано, но не удалось отправить его в Telegram. Токены не списаны.",
+                    reply_markup=get_video_mode_keyboard()
                 )
                 return
 
-            success, source, charged = consumetokens(userid, cost)
+            success, source, charged = consume_tokens(user_id, cost)
             if not success:
-                updategenerationjob(jobuuid, {
-                    "status": "failed",
-                    "errortext": "chargefailed"
-                })
+                update_generation_job(job_uuid, status="failed", error_text="charge_failed")
                 bot.send_message(
                     message.chat.id,
-                    f"Не удалось списать токены.\n{balanceline(userid)}",
-                    reply_markup=getvideomodekeyboard()
+                    f"⚠️ Видео отправлено, но не удалось списать токены.\n\n{balance_line(user_id)}",
+                    reply_markup=get_video_mode_keyboard()
                 )
                 return
 
-            updategenerationjob(jobuuid, {
-                "status": "delivered",
-                "charged": 1
-            })
+            update_generation_job(job_uuid, status="delivered", charged=1)
 
             bot.send_message(
                 message.chat.id,
-                f"Готово.\nСписано: {charged} {TOKEN_EMOJI}\n{balanceline(userid)}",
+                f"Готово.\n💸 Списано: *{charged}* {TOKEN_EMOJI}\n{balance_line(user_id)}",
                 parse_mode="Markdown",
-                reply_markup=getvideomodekeyboard()
+                reply_markup=get_video_mode_keyboard()
             )
             return
 
-    updategenerationjob(jobuuid, {
-        "status": "timeout",
-        "errortext": "polltimeout"
-    })
+    update_generation_job(job_uuid, status="timeout", error_text="poll_timeout")
+
     bot.send_message(
         message.chat.id,
-        "Время ожидания результата истекло. Попробуй позже.",
-        reply_markup=getvideomodekeyboard()
+        "⏳ Видео пока не готово. Токены ещё не списаны. Попробуй позже ещё раз.",
+        reply_markup=get_video_mode_keyboard()
+    )
+
+def process_video_photo_plus_prompt(message):
+    user_id = message.from_user.id
+    user_data = get_user_data(user_id)
+
+    model = user_data["video_model"]
+    model_name = VIDEO_MODELS.get(model, model)
+    flow = user_data["video_flow"] or "prompt_only"
+    duration = user_data["video_duration"]
+    aspect_ratio = user_data["video_aspect_ratio"]
+    cost = get_video_cost(model, duration)
+
+    if flow != "photo_plus_prompt":
+        bot.send_message(
+            message.chat.id,
+            "Сейчас у тебя выбран режим *по тексту*.\n\n"
+            "Отправь обычное текстовое сообщение с описанием видео.",
+            parse_mode="Markdown",
+            reply_markup=get_video_mode_keyboard()
+        )
+        return
+
+    prompt_text = (message.caption or "").strip()
+    if not prompt_text:
+        bot.send_message(
+            message.chat.id,
+            "Отправь фото *с подписью*, что нужно сгенерировать.",
+            parse_mode="Markdown",
+            reply_markup=get_video_mode_keyboard()
+        )
+        return
+
+    total_tokens = get_total_tokens(user_id)
+    if total_tokens < cost:
+        bot.send_message(
+            message.chat.id,
+            f"❌ Недостаточно токенов для *{model_name}*.\n\n"
+            f"Стоимость генерации: *{cost}* {TOKEN_EMOJI}\n"
+            f"💰 Твой баланс: *{total_tokens}* {TOKEN_EMOJI}",
+            parse_mode="Markdown",
+            reply_markup=get_video_mode_keyboard()
+        )
+        return
+
+    job_uuid = create_generation_job(
+        user_id=user_id,
+        provider="openrouter",
+        kind="video",
+        model=model,
+        flow="photo_plus_prompt",
+        prompt_text=prompt_text,
+        cost=cost
+    )
+
+    wait_msg = bot.send_message(
+        message.chat.id,
+        f"🎬 Запускаю генерацию видео через *{model_name}*...\n"
+        f"⏱ Длительность: *{duration}с*\n"
+        f"📐 Формат: *{aspect_ratio}*\n\n"
+        f"Обычно это занимает 1–5 минут.",
+        parse_mode="Markdown"
+    )
+
+    try:
+        input_image_data_url = telegram_photo_to_data_url(message)
+    except Exception as e:
+        logger.exception("Kling Video Telegram photo error: %s", e)
+        update_generation_job(job_uuid, status="failed", error_text=f"telegram_photo_failed: {e}")
+        safe_edit_message(
+            message.chat.id,
+            wait_msg.message_id,
+            "❌ Не удалось обработать фото из Telegram.",
+            reply_markup=None
+        )
+        bot.send_message(
+            message.chat.id,
+            "Попробуй отправить фото ещё раз.",
+            reply_markup=get_video_mode_keyboard()
+        )
+        return
+
+    submit_result = submit_openrouter_video_generation(
+        model=model,
+        prompt=prompt_text,
+        duration=duration,
+        aspect_ratio=aspect_ratio,
+        input_image_data_url=input_image_data_url
+    )
+
+    if not submit_result["ok"]:
+        update_generation_job(job_uuid, status="failed", error_text=submit_result["error"])
+        safe_edit_message(
+            message.chat.id,
+            wait_msg.message_id,
+            f"❌ {submit_result['error']}",
+            reply_markup=None
+        )
+        bot.send_message(
+            message.chat.id,
+            "Попробуй ещё раз с другим фото или описанием.",
+            reply_markup=get_video_mode_keyboard()
+        )
+        return
+
+    generation_id = submit_result.get("id")
+    polling_url = submit_result.get("polling_url")
+
+    update_generation_job(
+        job_uuid,
+        status="submitted",
+        provider_generation_id=generation_id or "",
+        polling_url=polling_url or ""
+    )
+
+    safe_edit_message(
+        message.chat.id,
+        wait_msg.message_id,
+        f"🎬 Генерация запущена.\n\n"
+        f"⏱ Длительность: *{duration}с*\n"
+        f"📐 Формат: *{aspect_ratio}*\n"
+        f"💰 Токены будут списаны только после успешной отправки результата.\n\n"
+        f"⏳ Ожидаю готовое видео...",
+        reply_markup=None
+    )
+
+    if not generation_id or not polling_url:
+        update_generation_job(job_uuid, status="failed", error_text="missing_generation_id_or_polling_url")
+        bot.send_message(
+            message.chat.id,
+            "❌ OpenRouter не вернул id или polling_url для видео.",
+            reply_markup=get_video_mode_keyboard()
+        )
+        return
+
+    for _ in range(VIDEO_POLL_MAX_ATTEMPTS):
+        time.sleep(VIDEO_POLL_INTERVAL)
+
+        poll_result = poll_openrouter_video(polling_url)
+        if not poll_result["ok"]:
+            continue
+
+        status = poll_result.get("status")
+        update_generation_job(job_uuid, status=status or "polling")
+
+        if status in ("pending", "in_progress"):
+            continue
+
+        if status == "failed":
+            update_generation_job(
+                job_uuid,
+                status="failed",
+                error_text=poll_result.get("error_message") or "video_generation_failed"
+            )
+            bot.send_message(
+                message.chat.id,
+                f"❌ Генерация видео завершилась ошибкой.\n\n{poll_result.get('error_message') or 'Неизвестная ошибка.'}",
+                reply_markup=get_video_mode_keyboard()
+            )
+            return
+
+        if status == "completed":
+            file_path = download_openrouter_video_content(generation_id, index=0, prefix="kling_photo")
+
+            if not file_path:
+                update_generation_job(job_uuid, status="failed", error_text="download_failed")
+                bot.send_message(
+                    message.chat.id,
+                    "❌ Не удалось скачать готовое видео.",
+                    reply_markup=get_video_mode_keyboard()
+                )
+                return
+
+            update_generation_job(job_uuid, status="completed", file_path=file_path)
+
+            try:
+                safe_send_video(
+                    message.chat.id,
+                    file_path,
+                    caption=f"🎬 Видео готово\n\nМодель: *{model_name}*",
+                    parse_mode="Markdown"
+                )
+
+                safe_send_document(
+                    message.chat.id,
+                    file_path,
+                    caption="📎 Видео файлом"
+                )
+            except Exception as e:
+                logger.exception("Ошибка отправки видео пользователю: %s", e)
+                update_generation_job(job_uuid, status="failed", error_text=f"telegram_send_failed: {e}")
+                bot.send_message(
+                    message.chat.id,
+                    "❌ Видео сгенерировано, но не удалось отправить его в Telegram. Токены не списаны.",
+                    reply_markup=get_video_mode_keyboard()
+                )
+                return
+
+            success, source, charged = consume_tokens(user_id, cost)
+            if not success:
+                update_generation_job(job_uuid, status="failed", error_text="charge_failed")
+                bot.send_message(
+                    message.chat.id,
+                    f"⚠️ Видео отправлено, но не удалось списать токены.\n\n{balance_line(user_id)}",
+                    reply_markup=get_video_mode_keyboard()
+                )
+                return
+
+            update_generation_job(job_uuid, status="delivered", charged=1)
+
+            bot.send_message(
+                message.chat.id,
+                f"Готово.\n💸 Списано: *{charged}* {TOKEN_EMOJI}\n{balance_line(user_id)}",
+                parse_mode="Markdown",
+                reply_markup=get_video_mode_keyboard()
+            )
+            return
+
+    update_generation_job(job_uuid, status="timeout", error_text="poll_timeout")
+
+    bot.send_message(
+        message.chat.id,
+        "⏳ Видео пока не готово. Токены ещё не списаны. Попробуй позже ещё раз.",
+        reply_markup=get_video_mode_keyboard()
     )
 
 
@@ -2258,7 +2542,7 @@ def cmd_addtokens(message):
     bot.send_message(
         message.chat.id,
         f"✅ Пользователю `{target_user_id}` начислено *{amount}* {TOKEN_EMOJI}\n"
-        f"💰 Новый баланс: *{total_tokens}* {TOKEN_EMOJI}",
+        f"💰 Новый баланс: *{total_tokens}* {TOKEN_EMОJI}",
         parse_mode="Markdown"
     )
 
@@ -2340,24 +2624,26 @@ def btn_text_models(message):
     )
 
 
-@bot.message_handler(func=lambda m: m.text == BTNNANO)
-def btnnanobananamessage(message):
-    userid = message.from_user.id
-    clearvideostate(userid)
-    setimagemode(userid, True)
-    setimagemodel(userid, DEFAULTIMAGEMODEL)
-    setpendingimageprompt(userid, "")
+@bot.message_handler(func=lambda m: m.text == BTN_NANO)
+def btn_nano_banana(message):
+    user_id = message.from_user.id
+
+    clear_video_state(user_id)
+    set_image_mode(user_id, True)
+    set_image_model(user_id, DEFAULT_IMAGE_MODEL)
+    set_image_flow(user_id, "prompt_only")
+    set_pending_image_prompt(user_id, "")
 
     bot.send_message(
         message.chat.id,
-        (
-            "📷 *Nano Banana*\n\n"
-            "Отправь:\n"
-            "- текстовый промт, или\n"
-            "- фото с подписью.\n\n"
-        ),
-        parse_mode="Markdown",
-        reply_markup=getimagemodekeyboard()
+        "🍌 Режим Nano Banana включен.",
+        reply_markup=get_image_mode_keyboard()
+    )
+
+    bot.send_message(
+        message.chat.id,
+        get_nano_mode_text(user_id),
+        reply_markup=get_nano_actions_keyboard(user_id)
     )
 
 
@@ -2373,31 +2659,37 @@ def btn_exit_mode(message):
         reply_markup=get_main_keyboard()
     )
 
-@bot.message_handler(func=lambda m: m.text == BTNVIDEO)
-def btnklingvideomessage(message):
-    userid = message.from_user.id
-    clearimagestate(userid)
-    setvideomode(userid, True)
-    setvideomodel(userid, DEFAULTVIDEOMODEL)
-    setvideoduration(userid, DEFAULTVIDEODURATION)
-    setvideoaspectratiouserid(userid, DEFAULTVIDEOASPECTRATIO)
+@bot.message_handler(func=lambda m: m.text == BTN_VIDEO)
+def btn_kling_video(message):
+    user_id = message.from_user.id
 
-    modelname = VIDEOMODELS[DEFAULTVIDEOMODEL]
-    cost = getvideocostmodel(DEFAULTVIDEOMODEL, DEFAULTVIDEODURATION)
+    clear_image_state(user_id)
+    set_video_mode(user_id, True)
+    set_video_model(user_id, DEFAULT_VIDEO_MODEL)
+    set_video_flow(user_id, "prompt_only")
+    set_video_duration(user_id, DEFAULT_VIDEO_DURATION)
+    set_video_aspect_ratio(user_id, DEFAULT_VIDEO_ASPECT_RATIO)
+
+    model_name = VIDEO_MODELS[DEFAULT_VIDEO_MODEL]
+    cost = get_video_cost(DEFAULT_VIDEO_MODEL, DEFAULT_VIDEO_DURATION)
 
     bot.send_message(
         message.chat.id,
-        (
-            f"🎬 Kling Video\n\n"
-            f"Модель: {modelname}\n"
-            f"Длительность: {DEFAULTVIDEODURATION} сек\n"
-            f"Формат: {DEFAULTVIDEOASPECTRATIO}\n"
-            f"Стоимость: {cost} {TOKENEMOJI}\n"
-            f"Баланс: {balanceline(userid)}\n\n"
-            f"Отправь текстовый промт или фото с подписью."
-        ),
-        parse_mode=None,
-        reply_markup=getklingvideokeyboard(userid)
+        f"🎬 *Режим Kling Video включен*\n\n"
+        f"Модель: *{model_name}*\n"
+        f"Текущая длительность: *{DEFAULT_VIDEO_DURATION}с*\n"
+        f"Текущий формат: *{DEFAULT_VIDEO_ASPECT_RATIO}*\n"
+        f"Стоимость: *{cost}* {TOKEN_EMOJI}\n"
+        f"{balance_line(user_id)}\n\n"
+        f"Выбери режим генерации, длительность и формат:",
+        parse_mode="Markdown",
+        reply_markup=get_video_mode_keyboard()
+    )
+
+    bot.send_message(
+        message.chat.id,
+        "⚙️ Настройки видео:",
+        reply_markup=get_kling_video_keyboard(user_id)
     )
 
 @bot.message_handler(func=lambda m: m.text == BTN_TOPUP)
@@ -2426,8 +2718,10 @@ def btn_support(message):
 
     support_text = (
         "🛟 <b>Поддержка</b>\n\n"
-        "Если возникли вопросы, проблемы со списанием токенов или генерацией,напишите в аккаунт поддержки:\n"
+        "Если возникли вопросы, проблемы со списанием токенов или генерацией,\n"
+        "напиши в аккаунт поддержки:\n"
         '<a href="https://t.me/ai_patriot_support">@ai_patriot_support</a>\n\n'
+        '🔗 Ссылка: <a href="https://t.me/ai_patriot_support">https://t.me/ai_patriot_support</a>'
     )
 
     inline_kb = types.InlineKeyboardMarkup()
@@ -2481,6 +2775,32 @@ def callback_model(call):
     )
 
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith("imgflow:"))
+def callback_image_flow(call):
+    flow = call.data.split("imgflow:", 1)[1]
+    user_id = call.from_user.id
+
+    if flow not in {"prompt_only", "photo_plus_prompt"}:
+        bot.answer_callback_query(call.id, "Неизвестный режим")
+        return
+
+    set_image_mode(user_id, True)
+    set_image_flow(user_id, flow)
+    set_pending_image_prompt(user_id, "")
+
+    if flow == "prompt_only":
+        bot.answer_callback_query(call.id, "Выбран режим: генерация по тексту")
+    else:
+        bot.answer_callback_query(call.id, "Выбран режим: редактирование фото")
+
+    safe_edit_message(
+        call.message.chat.id,
+        call.message.message_id,
+        get_nano_mode_text(user_id),
+        reply_markup=get_nano_actions_keyboard(user_id)
+    )
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("payplan:"))
 def callback_payplan(call):
     plan_key = call.data.split("payplan:", 1)[1]
@@ -2520,11 +2840,42 @@ def callback_payplan(call):
         reply_markup=kb
     )
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith("videoflow:"))
+def callback_video_flow(call):
+    flow = call.data.split("videoflow:", 1)[1]
+    user_id = call.from_user.id
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("videoduration"))
-def callbackvideoduration(call):
-    value = call.data.split("videoduration", 1)[1]
-    userid = call.from_user.id
+    if flow not in {"prompt_only", "photo_plus_prompt"}:
+        bot.answer_callback_query(call.id, "Неизвестный режим")
+        return
+
+    set_video_flow(user_id, flow)
+    data = get_user_data(user_id)
+
+    bot.answer_callback_query(call.id, "Режим обновлён")
+
+    flow_text = "по тексту" if flow == "prompt_only" else "по фото + описание"
+
+    safe_edit_message(
+        call.message.chat.id,
+        call.message.message_id,
+        f"🎬 *Kling Video*\\n\\n"
+        f"Режим: *{flow_text}*\\n"
+        f"Длительность: *{data['video_duration']}с*\\n"
+        f"Формат: *{data['video_aspect_ratio']}*\\n"
+        f"Стоимость: *{get_video_cost(data['video_model'], data['video_duration'])}* {TOKEN_EMOJI}\\n"
+        f"{balance_line(user_id)}\\n\\n"
+        f"Выбери параметры ниже, затем отправь:\\n"
+        f"- текстовый промт, если выбран режим по тексту;\\n"
+        f"- фото с подписью, если выбран режим по фото.",
+        reply_markup=get_kling_video_keyboard(user_id)
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("videoduration:"))
+def callback_video_duration(call):
+    value = call.data.split("videoduration:", 1)[1]
+    user_id = call.from_user.id
 
     try:
         duration = int(value)
@@ -2533,169 +2884,180 @@ def callbackvideoduration(call):
         return
 
     if duration not in (5, 10):
-        bot.answer_callback_query(call.id, "Доступно только 5 или 10 секунд")
+        bot.answer_callback_query(call.id, "Доступно только 5с или 10с")
         return
 
-    setvideoduration(userid, duration)
-    data = getuserdata(userid)
-    bot.answer_callback_query(call.id, f"Длительность: {duration} сек")
+    set_video_duration(user_id, duration)
+    data = get_user_data(user_id)
 
-    safeeditmessage(
+    bot.answer_callback_query(call.id, f"Длительность: {duration}с")
+
+    flow_text = "по тексту" if data["video_flow"] == "prompt_only" else "по фото + описание"
+
+    safe_edit_message(
         call.message.chat.id,
         call.message.message_id,
-        (
-            f"🎬 Kling Video\n\n"
-            f"Длительность: {data['videoduration']} сек\n"
-            f"Формат: {data['videoaspectratio']}\n"
-            f"Стоимость: {getvideocostmodel(data['videomodel'], data['videoduration'])} {TOKEN_EMOJI}\n"
-            f"Баланс: {balanceline(userid)}\n\n"
-            f"Отправь текстовый промт или фото с подписью."
-        ),
-        replymarkup=getklingvideokeyboard(userid)
+        f"🎬 *Kling Video*\\n\\n"
+        f"Режим: *{flow_text}*\\n"
+        f"Длительность: *{data['video_duration']}с*\\n"
+        f"Формат: *{data['video_aspect_ratio']}*\\n"
+        f"Стоимость: *{get_video_cost(data['video_model'], data['video_duration'])}* {TOKEN_EMOJI}\\n"
+        f"{balance_line(user_id)}\\n\\n"
+        f"Выбери параметры ниже, затем отправь запрос.",
+        reply_markup=get_kling_video_keyboard(user_id)
     )
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("videoaspect"))
-def callbackvideoaspect(call):
-    aspectratio = call.data.split("videoaspect", 1)[1]
-    userid = call.from_user.id
+@bot.callback_query_handler(func=lambda call: call.data.startswith("videoaspect:"))
+def callback_video_aspect(call):
+    aspect_ratio = call.data.split("videoaspect:", 1)[1]
+    user_id = call.from_user.id
 
-    if aspectratio not in ("169", "916", "11"):
+    if aspect_ratio not in {"16:9", "9:16", "1:1"}:
         bot.answer_callback_query(call.id, "Некорректный формат")
         return
 
-    setvideoaspectratio(userid, aspectratio)
-    data = getuserdata(userid)
-    bot.answer_callback_query(call.id, f"Формат: {aspectratio}")
+    set_video_aspect_ratio(user_id, aspect_ratio)
+    data = get_user_data(user_id)
 
-    safeeditmessage(
+    bot.answer_callback_query(call.id, f"Формат: {aspect_ratio}")
+
+    flow_text = "по тексту" if data["video_flow"] == "prompt_only" else "по фото + описание"
+
+    safe_edit_message(
         call.message.chat.id,
         call.message.message_id,
-        (
-            f"🎬 Kling Video\n\n"
-            f"Длительность: {data['videoduration']} сек\n"
-            f"Формат: {data['videoaspectratio']}\n"
-            f"Стоимость: {getvideocostmodel(data['videomodel'], data['videoduration'])} {TOKEN_EMOJI}\n"
-            f"Баланс: {balanceline(userid)}\n\n"
-            f"Отправь текстовый промт или фото с подписью."
-        ),
-        replymarkup=getklingvideokeyboard(userid)
+        f"🎬 *Kling Video*\\n\\n"
+        f"Режим: *{flow_text}*\\n"
+        f"Длительность: *{data['video_duration']}с*\\n"
+        f"Формат: *{data['video_aspect_ratio']}*\\n"
+        f"Стоимость: *{get_video_cost(data['video_model'], data['video_duration'])}* {TOKEN_EMOJI}\\n"
+        f"{balance_line(user_id)}\\n\\n"
+        f"Выбери параметры ниже, затем отправь запрос.",
+        reply_markup=get_kling_video_keyboard(user_id)
     )
 
 
-@bot.callback_query_handler(func=lambda call: call.data == "videohelpshow")
-def callbackvideohelpcall(call):
-    userid = call.from_user.id
-    data = getuserdata(userid)
+@bot.callback_query_handler(func=lambda call: call.data == "videohelp:show")
+def callback_video_help(call):
+    user_id = call.from_user.id
+    data = get_user_data(user_id)
+    flow_text = "по тексту" if data["video_flow"] == "prompt_only" else "по фото + описание"
 
-    bot.answer_callback_query(call.id, "Параметры Kling Video")
+    bot.answer_callback_query(call.id, "Готово")
 
-    safeeditmessage(
+    safe_edit_message(
         call.message.chat.id,
         call.message.message_id,
-        (
-            f"🎬 Kling Video\n\n"
-            f"Длительность: {data['videoduration']} сек\n"
-            f"Формат: {data['videoaspectratio']}\n"
-            f"Стоимость: {getvideocostmodel(data['videomodel'], data['videoduration'])} {TOKEN_EMOJI}\n"
-            f"Баланс: {balanceline(userid)}\n\n"
-            f"Отправь текстовый промт или фото с подписью."
-        ),
-        replymarkup=getklingvideokeyboard(userid)
+        f"🎬 *Kling Video готов к запуску*\\n\\n"
+        f"Режим: *{flow_text}*\\n"
+        f"Длительность: *{data['video_duration']}с*\\n"
+        f"Формат: *{data['video_aspect_ratio']}*\\n"
+        f"Стоимость: *{get_video_cost(data['video_model'], data['video_duration'])}* {TOKEN_EMOJI}\\n"
+        f"{balance_line(user_id)}\\n\\n"
+        f"Теперь отправь:\\n"
+        f"- обычное текстовое сообщение для text-to-video;\\n"
+        f"- фото с подписью для image-to-video.",
+        reply_markup=get_kling_video_keyboard(user_id)
     )
 
 @bot.message_handler(content_types=["photo"])
-def handlephotomessage(message):
-    data = getuserdata(message.from_user.id)
+def handle_photo(message):
+    data = get_user_data(message.from_user.id)
 
-    if data.get("videomode"):
-        processklingmessage(message)
+    if data.get("video_mode"):
+        if data.get("video_flow") == "photo_plus_prompt":
+            process_video_photo_plus_prompt(message)
+            return
+
+        bot.send_message(
+            message.chat.id,
+            "Сейчас выбран режим Kling по тексту.\n\n"
+            "Для Kling отправляй просто текстовый запрос.\n"
+            "Если хочешь режим по фото — переключи режим внутри Kling.",
+            parse_mode="Markdown",
+            reply_markup=get_video_mode_keyboard()
+        )
         return
 
-    if data.get("imagemode"):
-        processnanomessage(message)
+    if not data["image_mode"]:
+        bot.send_message(
+            message.chat.id,
+            "Сейчас режим Nano Banana не включён.\n"
+            "Сначала выбери Nano Banana или Kling.",
+            reply_markup=get_main_keyboard()
+        )
         return
 
-    bot.send_message(
-        message.chat.id,
-        "Выбери режим: Nano Banana или Kling.",
-        reply_markup=getmainkeyboard()
-    )
+    current_flow = data["image_flow"] or "prompt_only"
+
+    if current_flow != "photo_plus_prompt":
+        if data["image_flow"] != "prompt_only":
+            set_image_flow(message.from_user.id, "prompt_only")
+
+        bot.send_message(
+            message.chat.id,
+            "Сейчас выбран режим генерации по тексту.\n"
+            "Для редактирования фото выбери соответствующую кнопку Nano Banana.",
+            reply_markup=get_image_mode_keyboard()
+        )
+        return
+
+    process_nano_photo_plus_prompt(message)
 
 
 @bot.message_handler(content_types=["text"])
-def handletextmessage(message):
-    text = (message.text or "").strip()
-
-    if text.startswith("/"):
+def handle_text(message):
+    if message.text.startswith("/"):
         return
 
-    if text == BTNNANO:
-        btnnanobananamessage(message)
+    user_id = message.from_user.id
+    data = get_user_data(user_id)
+
+    if data.get("video_mode"):
+        if data.get("video_flow") == "photo_plus_prompt":
+            bot.send_message(
+                message.chat.id,
+                "Сейчас у Kling выбран режим *по фото + описанию*.\n\n"
+                "Отправь фото с подписью, что нужно анимировать.",
+                parse_mode="Markdown",
+                reply_markup=get_video_mode_keyboard()
+            )
+            return
+
+        process_video_prompt(message)
         return
 
-    if text == BTNVIDEO:
-        btnklingvideomessage(message)
-        return
+    if data["image_mode"]:
+        current_flow = data["image_flow"] or "prompt_only"
 
-    if text == BTNTOPUP:
-        btnpaymentsmessage(message)
-        return
+        if current_flow == "prompt_only":
+            if data["image_flow"] != "prompt_only":
+                set_image_flow(user_id, "prompt_only")
+            process_nano_prompt_only(message)
+            return
 
-    if text == BTNSUPPORT:
-        btnsupportmessage(message)
-        return
+        if current_flow == "photo_plus_prompt":
+            bot.send_message(
+                message.chat.id,
+                "Сейчас выбран режим редактирования фото.\n"
+                "Отправь фото с подписью, что нужно изменить.",
+                reply_markup=get_image_mode_keyboard()
+            )
+            return
 
-    if text == BTNBALANCE:
-        btnbalancemessage(message)
-        return
-
-    if text == BTNRESET:
-        btnrestartmessage(message)
-        return
-
-    if text == BTNEXIT:
-        btnexitmodemessage(message)
-        return
-
-    if text == BTNAI:
-        btntextmodelsmessage(message)
-        return
-
-    userid = message.from_user.id
-    data = getuserdata(userid)
-
-    if data.get("videomode"):
-        processklingmessage(message)
-        return
-
-    if data.get("imagemode"):
-        processnanomessage(message)
-        return
-
-    processtextquestionmessage(message)
-
-
-def process_update_safe(update):
-    try:
-        bot.process_new_updates([update])
-    except Exception as e:
-        logger.exception("Ошибка обработки update: %s", e)
+    process_text_question(message)
 
 
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
-    if not request.is_json:
-        abort(403)
-
-    try:
+    if request.headers.get("content-type") == "application/json":
         json_str = request.get_data().decode("utf-8")
         update = telebot.types.Update.de_json(json_str)
-        WEBHOOK_EXECUTOR.submit(process_update_safe, update)
-        return "ok", 200
-    except Exception as e:
-        logger.exception("Ошибка в webhook: %s", e)
-        return "error", 500
+        bot.process_new_updates([update])
+        return ""
+    else:
+        abort(403)
 
 
 @app.route("/", methods=["GET"])
@@ -2709,14 +3071,7 @@ def setup_webhook():
         bot.remove_webhook()
         time.sleep(1)
         bot.set_webhook(url=webhook_url)
-
-        info = bot.get_webhook_info()
-        logger.info(
-            "Webhook установлен: %s | pending=%s | last_error=%s",
-            info.url,
-            info.pending_update_count,
-            info.last_error_message
-        )
+        logger.info("Webhook установлен: %s", webhook_url)
     else:
         logger.warning("RENDER_EXTERNAL_HOSTNAME не задан, webhook не будет установлен")
 
