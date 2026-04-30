@@ -2634,7 +2634,41 @@ def handlephotomessage(message):
 
 @bot.message_handler(content_types=["text"])
 def handletextmessage(message):
-    if message.text.startswith("/"):
+    text = (message.text or "").strip()
+
+    if text.startswith("/"):
+        return
+
+    if text == BTNNANO:
+        btnnanobananamessage(message)
+        return
+
+    if text == BTNVIDEO:
+        btnklingvideomessage(message)
+        return
+
+    if text == BTNTOPUP:
+        btnpaymentsmessage(message)
+        return
+
+    if text == BTNSUPPORT:
+        btnsupportmessage(message)
+        return
+
+    if text == BTNBALANCE:
+        btnbalancemessage(message)
+        return
+
+    if text == BTNRESET:
+        btnrestartmessage(message)
+        return
+
+    if text == BTNEXIT:
+        btnexitmodemessage(message)
+        return
+
+    if text == BTNAI:
+        btntextmodelsmessage(message)
         return
 
     userid = message.from_user.id
