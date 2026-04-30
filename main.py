@@ -905,18 +905,22 @@ def get_main_keyboard():
 
 def get_image_mode_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row(BTN_NANO)
+    kb.row(BTN_AI)
+    kb.row(BTN_NANO, BTN_VIDEO)
     kb.row(BTN_BALANCE, BTN_TOPUP)
     kb.row(BTN_SUPPORT, BTN_RESET)
     return kb
+
 
 
 def get_video_mode_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row(BTN_VIDEO)
+    kb.row(BTN_AI)
+    kb.row(BTN_NANO, BTN_VIDEO)
     kb.row(BTN_BALANCE, BTN_TOPUP)
     kb.row(BTN_SUPPORT, BTN_RESET)
     return kb
+
 
 
 def get_current_keyboard(user_id: int):
