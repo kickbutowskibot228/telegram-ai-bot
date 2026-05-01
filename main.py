@@ -1538,7 +1538,7 @@ def webhook():
         if update is None:
             logger.warning("Webhook: de_json returned None")
             return "", 200
-        # Обработка update — TeleBot сам управляет потоками (threaded=True)
+        logger.info("Webhook: update_id=%s", update.update_id)  # <-- ДИАГНОСТИКА
         bot.process_new_updates([update])
     except Exception as e:
         logger.exception("Webhook handler error: %s", e)
@@ -1589,11 +1589,76 @@ def start_background_workers():
 
 
 # Инициализация при импорте (для gunicorn)
-init_db()
-start_background_workers()
-setup_webhook()
+# ============================================================
+# STARTUP — выполняется один раз при импорте модуля
+# ============================================================
+_initialized = False
+_init_lock = threading.Lock()
+
+def _initialize_once():
+    global _initialized
+    with _init_lock:
+        if _initialized:
+            return
+        try:
+            logger.info("Initializing database...")
+            init_db()
+            logger.info("Starting background workers...")
+            start_background_workers()
+            logger.info("Setting up webhook...")
+            setup_webhook()
+            _initialized = True
+            logger.info("✅ Initialization complete")
+        except Exception as e:
+            logger.exception("Initialization failed: %s", e)
+            raise
+
+# Вызываем сразу — это выполнится один раз при импорте main:app gunicorn'ом
+_initialize_once()
 
 
 if __name__ == "__main__":
-    # Только для локального теста! В проде — gunicorn.
+    # Только для локального теста
+    app.run(host="0.0.0.0", port=PORT, threaded=True)# ============================================================
+# STARTUP — выполняется один раз при импорте модуля
+# ============================================================
+_initialized = False
+_init_lock = threading.Lock()
+
+
+def log_registered_handlers():
+    try:
+        msg_count = len(bot.message_handlers)
+        cb_count = len(bot.callback_query_handlers)
+        logger.info("📋 Registered: %d message handlers, %d callback handlers",
+                    msg_count, cb_count)
+    except Exception as e:
+        logger.warning("Handler diagnostic failed: %s", e)
+
+
+def _initialize_once():
+    global _initialized
+    with _init_lock:
+        if _initialized:
+            return
+        try:
+            logger.info("🔧 Initializing database...")
+            init_db()
+            logger.info("🔧 Starting background workers...")
+            start_background_workers()
+            log_registered_handlers()
+            logger.info("🔧 Setting up webhook...")
+            setup_webhook()
+            _initialized = True
+            logger.info("✅ Initialization complete")
+        except Exception as e:
+            logger.exception("❌ Initialization failed: %s", e)
+            raise
+
+
+# Вызываем при импорте модуля (gunicorn вызывает main:app)
+_initialize_once()
+
+
+if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT, threaded=True)
