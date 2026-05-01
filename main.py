@@ -58,7 +58,7 @@ if not OPENROUTER_API_KEY:
     raise RuntimeError("Не задан OPENROUTER_API_KEY")
 
 # ВАЖНО: threaded=False — мы сами управляем потоками через executor
-bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown", threaded=True, num_threads=4)
+bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown", threaded=False )
 app = Flask(__name__)
 
 DB_PATH = "bot.db"
@@ -1499,7 +1499,7 @@ def _check_rate(uid, chat_id):
 
 @bot.message_handler(content_types=["photo"])
 def handle_photo(message):
-    logger.info("🖼 handle_photo called: user=%s", message.from_user.id)
+    logger.info("🖼 handle_photo: user=%s", message.from_user.id)
     uid = message.from_user.id
     if not _check_rate(uid, message.chat.id): return
     d = get_user_data(uid)
@@ -1514,7 +1514,7 @@ def handle_photo(message):
 
 @bot.message_handler(content_types=["text"])
 def handle_text(message):
-    logger.info("💬 handle_text called: user=%s text=%r",
+    logger.info("💬 handle_text: user=%s text=%r",
                 message.from_user.id, (message.text or "")[:50])
     if not message.text or message.text.startswith("/"):
         return
@@ -1543,12 +1543,15 @@ def webhook():
             logger.warning("Webhook: de_json returned None")
             return "", 200
 
-        logger.info("Webhook: received update_id=%s", update.update_id)
-        # Обрабатываем напрямую — TeleBot thread-safe с threaded=True
+        logger.info("📨 Webhook: received update_id=%s", update.update_id)
+
+        # КРИТИЧНО: прямой вызов, без executor!
+        # TeleBot threaded=False → хендлеры вызываются в этом же потоке
         bot.process_new_updates([update])
-        logger.info("Webhook: processed update_id=%s", update.update_id)
-    except Exception as e:
-        logger.exception("Webhook handler error: %s", e)
+
+        logger.info("✅ Webhook: processed update_id=%s", update.update_id)
+    except Exception:
+        logger.exception("❌ Webhook handler error")
     return "", 200
 
 
@@ -1635,49 +1638,6 @@ def _initialize_once():
 
 
 # Вызов при импорте — однократно защищён _init_lock
-_initialize_once()
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT, threaded=True) 
-# ============================================================
-# STARTUP — выполняется один раз при импорте модуля
-# ============================================================
-_initialized = False
-_init_lock = threading.Lock()
-
-
-def log_registered_handlers():
-    try:
-        msg_count = len(bot.message_handlers)
-        cb_count = len(bot.callback_query_handlers)
-        logger.info("📋 Registered: %d message handlers, %d callback handlers",
-                    msg_count, cb_count)
-    except Exception as e:
-        logger.warning("Handler diagnostic failed: %s", e)
-
-
-def _initialize_once():
-    global _initialized
-    with _init_lock:
-        if _initialized:
-            return
-        try:
-            logger.info("🔧 Initializing database...")
-            init_db()
-            logger.info("🔧 Starting background workers...")
-            start_background_workers()
-            log_registered_handlers()
-            logger.info("🔧 Setting up webhook...")
-            setup_webhook()
-            _initialized = True
-            logger.info("✅ Initialization complete")
-        except Exception as e:
-            logger.exception("❌ Initialization failed: %s", e)
-            raise
-
-
-# Вызываем при импорте модуля (gunicorn вызывает main:app)
 _initialize_once()
 
 
