@@ -58,7 +58,7 @@ if not OPENROUTER_API_KEY:
     raise RuntimeError("Не задан OPENROUTER_API_KEY")
 
 # ВАЖНО: threaded=False — мы сами управляем потоками через executor
-bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown", threaded=False)
+bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown", threaded=True, num_threads=4)
 app = Flask(__name__)
 
 DB_PATH = "bot.db"
@@ -1530,11 +1530,18 @@ def handle_text(message):
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
     if request.headers.get("content-type") != "application/json":
+        logger.warning("Webhook: wrong content-type")
         abort(403)
-    raw = request.get_data(as_text=True)
-    update = telebot.types.Update.de_json(raw)
-    # КЛЮЧЕВОЕ: обработка update уходит в фон, webhook отвечает мгновенно
-    executor.submit(bot.process_new_updates, [update])
+    try:
+        raw = request.get_data(as_text=True)
+        update = telebot.types.Update.de_json(raw)
+        if update is None:
+            logger.warning("Webhook: de_json returned None")
+            return "", 200
+        # Обработка update — TeleBot сам управляет потоками (threaded=True)
+        bot.process_new_updates([update])
+    except Exception as e:
+        logger.exception("Webhook handler error: %s", e)
     return "", 200
 
 
