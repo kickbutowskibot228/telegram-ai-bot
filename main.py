@@ -84,36 +84,127 @@ BTN_SUPPORT = "🛟 Поддержка"
 SUPPORT_USERNAME = "ai_patriot_support"
 SUPPORT_URL = f"https://t.me/{SUPPORT_USERNAME}"
 
-TEXT_MODELS = {
-    "openai/gpt-5.2": "GPT-5.2",
-    "google/gemini-3-flash-preview": "Gemini 3 Flash",
-    "anthropic/claude-opus-4.6": "Claude Opus 4.6",
-    "anthropic/claude-sonnet-4.6": "Claude Sonnet 4.6",
+# ============================================================
+# КОНФИГ МОДЕЛЕЙ — единое место для управления всеми моделями
+#
+# Чтобы добавить новую модель:
+#   1. Добавьте блок в TEXT_MODELS_CONFIG / IMAGE_MODELS_CONFIG / VIDEO_MODELS_CONFIG
+#   2. Больше ничего не трогайте — всё остальное генерируется автоматически
+# ============================================================
+
+# ------ ТЕКСТОВЫЕ МОДЕЛИ ------
+# Формат: "openrouter_id": {"name": str, "cost": int, "emoji": str}
+# cost — стоимость в токенах за один запрос
+TEXT_MODELS_CONFIG = {
+    "google/gemini-3-flash-preview": {
+        "name": "Gemini 3 Flash",
+        "cost": 2,
+        "emoji": "⚡",
+        "description": "Быстрая и дешёвая",
+    },
+    "openai/gpt-5.2": {
+        "name": "GPT-5.2",
+        "cost": 5,
+        "emoji": "🤖",
+        "description": "Мощная модель OpenAI",
+    },
+    "anthropic/claude-sonnet-4.6": {
+        "name": "Claude Sonnet 4.6",
+        "cost": 8,
+        "emoji": "🎭",
+        "description": "Умная и точная",
+    },
+    "anthropic/claude-opus-4.6": {
+        "name": "Claude Opus 4.6",
+        "cost": 12,
+        "emoji": "👑",
+        "description": "Лучшая от Anthropic",
+    },
+    "moonshotai/kimi-k2.6": {
+        "name": "kimi 2.6",
+        "cost": 3,
+        "emoji": "🌝",
+        "description": "moonshot ai",
+    },
 }
-TEXT_MODEL_COSTS = {
-    "google/gemini-3-flash-preview": 2,
-    "openai/gpt-5.2": 5,
-    "anthropic/claude-sonnet-4.6": 8,
-    "anthropic/claude-opus-4.6": 12,
+
+# ------ МОДЕЛИ ИЗОБРАЖЕНИЙ ------
+# Формат: "openrouter_id": {
+#   "name": str, "emoji": str,
+#   "cost_text": int,   — генерация по тексту
+#   "cost_photo": int,  — редактирование фото
+# }
+IMAGE_MODELS_CONFIG = {
+    "google/gemini-3-pro-image-preview": {
+        "name": "Nano Banana Pro",
+        "emoji": "🍌",
+        "cost_text": 10,
+        "cost_photo": 12,
+        "description": "Генерация и редактирование изображений",
+    },
+    "openai/gpt-5.4-image-2": {
+        "name": "GPT Image-2",
+        "emoji": "🖼",
+        "cost_text": 15,
+        "cost_photo": 18,
+        "description": "Новая версии от OpenAI",
+    },
 }
-IMAGE_MODELS = {"google/gemini-3-pro-image-preview": "🍌 Nano Banana Pro"}
-PROMPT_ONLY_COSTS = {"google/gemini-3-pro-image-preview": 10}
-PHOTO_PROMPT_COSTS = {"google/gemini-3-pro-image-preview": 12}
-DEFAULT_MODEL = "google/gemini-3-flash-preview"
+
+# ------ МОДЕЛИ ВИДЕО ------
+# Формат: "openrouter_id": {
+#   "name": str, "emoji": str,
+#   "costs": {длительность_сек: стоимость},
+# }
+VIDEO_MODELS_CONFIG = {
+    "kwaivgi/kling-v3.0-pro": {
+        "name": "Kling V3",
+        "emoji": "🎬",
+        "costs": {5: 40, 10: 70},
+        "description": "Качественная генерация видео",
+        "max_duration": 10,
+    },
+    "minimax/hailuo-2.3": {
+        "name": "MiniMax Video",
+        "emoji": "🆙",
+        "costs": {5: 35, 10: 60},
+        "description": "Альтернативная видео модель",
+        "max_duration": 10,
+    },
+    "bytedance/seedance-2.0": {
+        "name": "Seedance 2.0",
+        "emoji": "🎥",
+        "costs": {5: 35, 10: 60},
+        "description": "Альтернативная видео модель",
+        "max_duration": 10,
+    },
+}
+
+# ------ ДЕФОЛТНЫЕ МОДЕЛИ ------
+# Установите ID из конфигов выше
+DEFAULT_TEXT_MODEL = "google/gemini-3-flash-preview"
 DEFAULT_IMAGE_MODEL = "google/gemini-3-pro-image-preview"
-VIDEO_MODELS = {"kwaivgi/kling-video-o1": "🎬 Kling Video O1"}
-VIDEO_PROMPT_COSTS = {"kwaivgi/kling-video-o1": {5: 40, 10: 70}}
 DEFAULT_VIDEO_MODEL = "kwaivgi/kling-video-o1"
 DEFAULT_VIDEO_DURATION = 5
 DEFAULT_VIDEO_ASPECT_RATIO = "16:9"
-VIDEO_POLL_INTERVAL = 15
-VIDEO_POLL_MAX_ATTEMPTS = 60
 
-PAY_PLANS = {
-    "small": {"label": f"800 {TOKEN_EMOJI}", "amount": 250, "tokens": 800},
-    "medium": {"label": f"1800 {TOKEN_EMOJI}", "amount": 400, "tokens": 1800},
-    "large": {"label": f"4000 {TOKEN_EMOJI}", "amount": 750, "tokens": 4000},
-}
+# ============================================================
+# АВТОГЕНЕРАЦИЯ словарей совместимости — НЕ ТРОГАТЬ
+# Все словари ниже генерируются из конфигов выше автоматически
+# ============================================================
+TEXT_MODELS = {k: v["name"] for k, v in TEXT_MODELS_CONFIG.items()}
+TEXT_MODEL_COSTS = {k: v["cost"] for k, v in TEXT_MODELS_CONFIG.items()}
+TEXT_MODEL_EMOJIS = {k: v.get("emoji", "🤖") for k, v in TEXT_MODELS_CONFIG.items()}
+
+IMAGE_MODELS = {k: f"{v['emoji']} {v['name']}" for k, v in IMAGE_MODELS_CONFIG.items()}
+PROMPT_ONLY_COSTS = {k: v["cost_text"] for k, v in IMAGE_MODELS_CONFIG.items()}
+PHOTO_PROMPT_COSTS = {k: v["cost_photo"] for k, v in IMAGE_MODELS_CONFIG.items()}
+
+VIDEO_MODELS = {k: f"{v['emoji']} {v['name']}" for k, v in VIDEO_MODELS_CONFIG.items()}
+VIDEO_PROMPT_COSTS = {k: v["costs"] for k, v in VIDEO_MODELS_CONFIG.items()}
+
+# Псевдонимы для совместимости с остальным кодом
+DEFAULT_MODEL = DEFAULT_TEXT_MODEL
 
 
 # ============================================================
@@ -641,11 +732,22 @@ def get_current_keyboard(user_id): return get_main_keyboard()
 
 
 def get_models_keyboard():
+    """Клавиатура выбора текстовой модели.
+    Автоматически строится из TEXT_MODELS_CONFIG — просто добавьте модель в конфиг.
+    """
     kb = types.InlineKeyboardMarkup()
-    for mid, name in TEXT_MODELS.items():
+    for model_id, cfg in TEXT_MODELS_CONFIG.items():
+        emoji = cfg.get("emoji", "🤖")
+        name = cfg["name"]
+        cost = cfg["cost"]
+        desc = cfg.get("description", "")
+        label = f"{emoji} {name} — {cost} {TOKEN_EMOJI}"
+        if desc:
+            label += f"\n   {desc}"
         kb.add(types.InlineKeyboardButton(
-            f"{name} — {TEXT_MODEL_COSTS.get(mid, 1)} {TOKEN_EMOJI}",
-            callback_data=f"model:{mid}"))
+            label,
+            callback_data=f"model:{model_id}"
+        ))
     return kb
 
 
@@ -1678,15 +1780,20 @@ def btn_support(message):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("model:"))
 def callback_model(call):
     mid = call.data.split(":", 1)[1]
-    if mid not in TEXT_MODELS:
-        bot.answer_callback_query(call.id); return
+    if mid not in TEXT_MODELS_CONFIG:
+        bot.answer_callback_query(call.id, "Неизвестная модель"); return
+
+    cfg = TEXT_MODELS_CONFIG[mid]
     set_user_model(call.from_user.id, mid)
     clear_chat_history(call.from_user.id)
-    bot.answer_callback_query(call.id, TEXT_MODELS[mid])
+    bot.answer_callback_query(call.id, f"Выбрана: {cfg['name']}")
+
     safe_edit_message(call.message.chat.id, call.message.message_id,
-        f"🧠 Модель: *{TEXT_MODELS[mid]}*\n"
-        f"Стоимость: *{TEXT_MODEL_COSTS.get(mid,1)}* {TOKEN_EMOJI}\n"
-        f"{balance_line(call.from_user.id)}\nЗадай вопрос.")
+        f"{cfg.get('emoji','🤖')} *{cfg['name']}*\n"
+        f"{cfg.get('description','')}\n\n"
+        f"Стоимость: *{cfg['cost']}* {TOKEN_EMOJI} за запрос\n"
+        f"{balance_line(call.from_user.id)}\n\n"
+        f"История диалога очищена. Задай вопрос.")
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("payplan:"))
