@@ -49,7 +49,6 @@ ADMIN_IDS = {int(x.strip()) for x in ADMIN_IDS_RAW.split(",") if x.strip().isdig
 YOOKASSA_ENABLED = all([YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY, YOOKASSA_RETURN_URL])
 PORT = int(os.environ.get("PORT", 10000))
 
-# Размеры пулов — регулируйте под ресурсы
 WORKER_POOL_SIZE = int(os.getenv("WORKER_POOL_SIZE", "32"))
 
 if not TELEGRAM_TOKEN:
@@ -57,8 +56,7 @@ if not TELEGRAM_TOKEN:
 if not OPENROUTER_API_KEY:
     raise RuntimeError("Не задан OPENROUTER_API_KEY")
 
-# ВАЖНО: threaded=False — мы сами управляем потоками через executor
-bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown", threaded=False )
+bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown", threaded=False)
 app = Flask(__name__)
 
 DB_PATH = "bot.db"
@@ -68,6 +66,9 @@ TOKEN_EMOJI = "🍼"
 GENERATED_DIR = "generated_images"
 GENERATED_VIDEOS_DIR = "generated_videos"
 CHAT_HISTORY_LIMIT = 12
+
+# TTL для lock — больше самой долгой генерации видео
+USER_LOCK_TTL = 20 * 60  # 20 минут
 
 os.makedirs(GENERATED_DIR, exist_ok=True)
 os.makedirs(GENERATED_VIDEOS_DIR, exist_ok=True)
@@ -116,7 +117,7 @@ PAY_PLANS = {
 
 
 # ============================================================
-# HTTP CLIENT — один Session на весь процесс (keep-alive + retry)
+# HTTP CLIENT
 # ============================================================
 def _build_http_session() -> requests.Session:
     s = requests.Session()
@@ -145,13 +146,12 @@ OPENROUTER_HEADERS = {
 _db_local = threading.local()
 
 def _get_conn() -> sqlite3.Connection:
-    """Одно соединение на поток — переиспользуется."""
     conn = getattr(_db_local, "conn", None)
     if conn is None:
         conn = sqlite3.connect(
             DB_PATH,
             timeout=30,
-            isolation_level=None,   # autocommit; транзакции — вручную
+            isolation_level=None,
             check_same_thread=False,
         )
         conn.execute("PRAGMA journal_mode=WAL;")
@@ -165,7 +165,6 @@ def _get_conn() -> sqlite3.Connection:
 
 @contextmanager
 def db_tx():
-    """Транзакция с авто-rollback."""
     conn = _get_conn()
     try:
         conn.execute("BEGIN IMMEDIATE;")
@@ -225,12 +224,17 @@ def init_db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS user_locks (
+            user_id INTEGER PRIMARY KEY,
+            locked_at REAL NOT NULL,
+            reason TEXT DEFAULT ''
+        );
         CREATE INDEX IF NOT EXISTS ix_chat_user ON chat_history(user_id, id DESC);
         CREATE INDEX IF NOT EXISTS ix_jobs_poll ON generation_jobs(kind, status, next_poll_at);
         CREATE INDEX IF NOT EXISTS ix_jobs_user ON generation_jobs(user_id);
         CREATE INDEX IF NOT EXISTS ix_payments_user ON payments(user_id);
+        CREATE INDEX IF NOT EXISTS ix_locks_age ON user_locks(locked_at);
     """)
-    # Мягкие миграции для новых колонок (если БД старая)
     existing = {r[1] for r in conn.execute("PRAGMA table_info(generation_jobs)").fetchall()}
     for col, ddl in [
         ("chat_id", "ALTER TABLE generation_jobs ADD COLUMN chat_id INTEGER DEFAULT 0"),
@@ -244,7 +248,7 @@ def init_db():
 
 
 # ============================================================
-# LRU КЭШ ПОЛЬЗОВАТЕЛЕЙ (экономит запросы к БД)
+# LRU КЭШ ПОЛЬЗОВАТЕЛЕЙ
 # ============================================================
 class UserCache:
     def __init__(self, maxsize=5000, ttl=30):
@@ -293,19 +297,69 @@ def rate_limit_ok(user_id: int, max_per_minute: int = 20) -> bool:
     return True
 
 
-_user_busy: dict = {}
+# =====  USER LOCKS в БД — работают между процессами и переживают рестарты  =====
 _user_busy_lock = threading.Lock()
 
-def try_acquire_user(user_id: int) -> bool:
+
+def try_acquire_user(user_id: int, reason: str = "") -> bool:
+    """
+    Атомарно ставит lock в БД. Возвращает True если lock поставлен.
+    Автоматически снимает lock'и старше USER_LOCK_TTL.
+    """
+    now = time.time()
+    cutoff = now - USER_LOCK_TTL
+
     with _user_busy_lock:
-        if _user_busy.get(user_id):
-            return False
-        _user_busy[user_id] = True
-        return True
+        try:
+            with db_tx() as c:
+                # Удаляем протухшие lock'и
+                c.execute("DELETE FROM user_locks WHERE locked_at < ?", (cutoff,))
+
+                # Проверяем есть ли активный lock
+                row = c.execute(
+                    "SELECT locked_at, reason FROM user_locks WHERE user_id = ?",
+                    (user_id,)
+                ).fetchone()
+
+                if row:
+                    logger.info("🔒 Lock already held by user=%s since %.0fs ago (reason=%s)",
+                                user_id, now - row[0], row[1] or "?")
+                    return False
+
+                c.execute(
+                    "INSERT INTO user_locks (user_id, locked_at, reason) VALUES (?, ?, ?)",
+                    (user_id, now, reason)
+                )
+                logger.info("🔐 Lock acquired for user=%s (%s)", user_id, reason)
+                return True
+        except Exception as e:
+            logger.exception("try_acquire_user failed: %s", e)
+            # fail-open: при ошибке БД разрешаем, чтобы не заблокировать бота
+            return True
+
 
 def release_user(user_id: int):
+    """Снимает lock пользователя. Идемпотентно — можно вызывать многократно."""
     with _user_busy_lock:
-        _user_busy.pop(user_id, None)
+        try:
+            with db_tx() as c:
+                c.execute("DELETE FROM user_locks WHERE user_id = ?", (user_id,))
+            logger.info("🔓 Lock released for user=%s", user_id)
+        except Exception as e:
+            logger.warning("release_user failed: %s", e)
+
+
+def cleanup_stale_locks():
+    """Удаляет lock'и старше TTL. Вызывается периодически."""
+    cutoff = time.time() - USER_LOCK_TTL
+    try:
+        with db_tx() as c:
+            cursor = c.execute("DELETE FROM user_locks WHERE locked_at < ?", (cutoff,))
+            removed = cursor.rowcount if hasattr(cursor, 'rowcount') else 0
+            if removed and removed > 0:
+                logger.info("🧹 Cleaned up %d stale locks", removed)
+    except Exception as e:
+        logger.warning("cleanup_stale_locks: %s", e)
 
 
 # ============================================================
@@ -462,7 +516,6 @@ def clear_chat_history(user_id):
 
 
 def consume_tokens(user_id: int, cost: int):
-    """Атомарное списание в транзакции."""
     with db_tx() as c:
         row = c.execute("SELECT free_tokens, paid_tokens FROM users WHERE user_id=?",
                         (user_id,)).fetchone()
@@ -677,8 +730,6 @@ def safe_send_document(chat_id, file_path, caption=None, parse_mode=None):
 
 def safe_send_video(chat_id, file_path, caption=None, parse_mode=None,
                     supports_streaming=True, width=None, height=None, duration=None):
-    """Отправка видео с проверками и детальным логированием."""
-    # Проверка существования файла
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Video file not found: {file_path}")
 
@@ -686,11 +737,9 @@ def safe_send_video(chat_id, file_path, caption=None, parse_mode=None,
     size_mb = size_bytes / (1024 * 1024)
     logger.info("📹 Sending video: %s (%.2f MB)", file_path, size_mb)
 
-    # Telegram Bot API limit: 50 MB для видео
     if size_bytes > 50 * 1024 * 1024:
         raise ValueError(f"Video too large: {size_mb:.2f} MB (max 50 MB)")
 
-    # Проверка что файл не пустой / не битый
     if size_bytes < 1024:
         raise ValueError(f"Video file too small (likely broken): {size_bytes} bytes")
 
@@ -700,7 +749,7 @@ def safe_send_video(chat_id, file_path, caption=None, parse_mode=None,
             caption=caption,
             parse_mode=parse_mode,
             supports_streaming=supports_streaming,
-            timeout=120,  # увеличенный таймаут для больших файлов
+            timeout=120,
         )
 
 
@@ -755,7 +804,7 @@ def send_generated_image_both(chat_id, file_path, caption_preview, caption_file)
 
 
 # ============================================================
-# OPENROUTER (через общий HTTP.Session)
+# OPENROUTER
 # ============================================================
 def call_openrouter_text(model, user_message, history=None, max_retries=2):
     url = "https://openrouter.ai/api/v1/chat/completions"
@@ -857,7 +906,6 @@ def poll_openrouter_video(polling_url):
 
 
 def download_openrouter_video_content(gen_id, index=0, prefix="kling"):
-    """Скачивание с валидацией размера и retry."""
     fn = f"{prefix}_{int(time.time())}_{uuid.uuid4().hex[:8]}.mp4"
     fp = os.path.join(GENERATED_VIDEOS_DIR, fn)
     url = f"https://openrouter.ai/api/v1/videos/{gen_id}/content?index={index}"
@@ -869,7 +917,7 @@ def download_openrouter_video_content(gen_id, index=0, prefix="kling"):
                         attempt + 1, max_attempts, gen_id)
             with HTTP.get(url,
                           headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
-                          timeout=600,  # 10 минут на скачивание
+                          timeout=600,
                           stream=True) as r:
                 if r.status_code != 200:
                     logger.error("video dl status=%d: %s", r.status_code, r.text[:200])
@@ -878,7 +926,6 @@ def download_openrouter_video_content(gen_id, index=0, prefix="kling"):
                         continue
                     return None
 
-                # Content-Length для проверки
                 expected_size = int(r.headers.get("Content-Length", 0))
                 logger.info("📏 Expected size: %d bytes (%.2f MB)",
                             expected_size, expected_size / (1024 * 1024))
@@ -893,7 +940,6 @@ def download_openrouter_video_content(gen_id, index=0, prefix="kling"):
                 logger.info("📥 Downloaded: %d bytes (%.2f MB)",
                             bytes_written, bytes_written / (1024 * 1024))
 
-                # Валидация: файл должен быть хотя бы ~10KB и совпадать с Content-Length
                 if bytes_written < 10 * 1024:
                     logger.error("Downloaded file too small: %d bytes", bytes_written)
                     try: os.remove(fp)
@@ -995,7 +1041,7 @@ def submit_task(fn, *args, **kwargs):
 
 
 # ============================================================
-# BUSINESS LOGIC (в фоне через executor)
+# BUSINESS LOGIC
 # ============================================================
 def process_text_question(message):
     user_id = message.from_user.id
@@ -1038,7 +1084,7 @@ def process_text_question(message):
 def process_nano_request(message):
     """Nano Banana с защитой от параллельных запросов."""
     user_id = message.from_user.id
-    if not try_acquire_user(user_id):
+    if not try_acquire_user(user_id, reason="image_generation"):
         safe_send_message(message.chat.id,
             "⏳ У тебя уже идёт генерация — дождись результата.",
             reply_markup=get_image_mode_keyboard())
@@ -1128,9 +1174,9 @@ def process_nano_request(message):
 
 
 def submit_video_job(message):
-    """Ставит видео в очередь OpenRouter + в БД. Дальше опрашивает фоновый поллер."""
+    """Ставит видео в очередь + в БД. Дальше опрашивает фоновый поллер."""
     user_id = message.from_user.id
-    if not try_acquire_user(user_id):
+    if not try_acquire_user(user_id, reason="video_generation"):
         safe_send_message(message.chat.id,
             "⏳ У тебя уже идёт генерация видео.",
             reply_markup=get_video_mode_keyboard())
@@ -1211,7 +1257,6 @@ def _finalize_video_job(job_row):
     cost = job_row["cost"]
     gen_id = job_row["provider_generation_id"]
     try:
-        # === 1. Скачивание ===
         fp = download_openrouter_video_content(
             gen_id, 0,
             prefix="kling_photo" if job_row["flow"] == "photo_plus_prompt" else "kling_text")
@@ -1223,7 +1268,6 @@ def _finalize_video_job(job_row):
                 reply_markup=get_video_mode_keyboard())
             return
 
-        # === 2. Валидация скачанного файла ===
         if not os.path.exists(fp) or os.path.getsize(fp) < 10 * 1024:
             update_generation_job(job_uuid, status="failed", error_text="file_corrupted")
             safe_send_message(chat_id,
@@ -1239,11 +1283,10 @@ def _finalize_video_job(job_row):
         logger.info("📦 Video downloaded: %s (%.2f MB)", fp, file_size_mb)
         update_generation_job(job_uuid, status="completed", file_path=fp)
 
-        # === 3. Попытка 1: send_video ===
+        # Попытка 1: send_video
         video_sent = False
         send_error = None
         try:
-            # Caption БЕЗ Markdown — чтобы избежать parse ошибок
             safe_send_video(
                 chat_id, fp,
                 caption=f"🎬 Видео готово ({file_size_mb:.1f} MB)",
@@ -1256,7 +1299,7 @@ def _finalize_video_job(job_row):
             send_error = e
             logger.warning("send_video failed, trying send_document: %s", e)
 
-        # === 4. Попытка 2: send_document (если первая не сработала) ===
+        # Попытка 2: send_document
         if not video_sent:
             try:
                 safe_send_document(
@@ -1270,7 +1313,6 @@ def _finalize_video_job(job_row):
                 logger.exception("send_document also failed: %s", e)
                 send_error = e
 
-        # === 5. Если обе попытки упали — не списываем, пишем пользователю ===
         if not video_sent:
             err_text = str(send_error)[:300]
             update_generation_job(job_uuid, status="failed",
@@ -1285,7 +1327,6 @@ def _finalize_video_job(job_row):
                 reply_markup=get_video_mode_keyboard())
             return
 
-        # === 6. Всё отправлено — списываем токены ===
         ok, _, ch = consume_tokens(user_id, cost)
         if not ok:
             update_generation_job(job_uuid, status="failed", error_text="charge_failed")
@@ -1312,39 +1353,57 @@ def _finalize_video_job(job_row):
 
 
 def _poll_video_job(job_row):
-    """Один проход опроса."""
+    """Один проход опроса — с защитой от потери lock при неожиданных ошибках."""
     job_uuid = job_row["job_uuid"]
+    user_id = job_row["user_id"]
     attempts = job_row["attempts"] or 0
-    if attempts >= VIDEO_POLL_MAX_ATTEMPTS:
-        update_generation_job(job_uuid, status="timeout", error_text="poll_timeout")
-        try:
-            safe_send_message(job_row["chat_id"],
-                "⏳ Видео не успело сгенерироваться. Токены не списаны.",
-                reply_markup=get_video_mode_keyboard())
-        finally:
-            release_user(job_row["user_id"])
-        return
 
-    res = poll_openrouter_video(job_row["polling_url"])
-    update_generation_job(job_uuid, attempts=attempts + 1)
-    if not res["ok"]:
-        return
-    status = res.get("status")
-    if status in ("pending", "in_progress", None):
-        update_generation_job(job_uuid, status=status or "polling")
-        return
-    if status == "failed":
-        update_generation_job(job_uuid, status="failed",
-                              error_text=res.get("error_message") or "video_failed")
+    try:
+        if attempts >= VIDEO_POLL_MAX_ATTEMPTS:
+            update_generation_job(job_uuid, status="timeout", error_text="poll_timeout")
+            try:
+                safe_send_message(job_row["chat_id"],
+                    "⏳ Видео не успело сгенерироваться. Токены не списаны.",
+                    reply_markup=get_video_mode_keyboard())
+            except Exception: pass
+            release_user(user_id)
+            return
+
+        res = poll_openrouter_video(job_row["polling_url"])
+        update_generation_job(job_uuid, attempts=attempts + 1)
+
+        if not res["ok"]:
+            return  # попробуем в следующий заход
+
+        status = res.get("status")
+        if status in ("pending", "in_progress", None):
+            update_generation_job(job_uuid, status=status or "polling")
+            return
+
+        if status == "failed":
+            update_generation_job(job_uuid, status="failed",
+                                  error_text=res.get("error_message") or "video_failed")
+            try:
+                safe_send_message(job_row["chat_id"],
+                    f"❌ Генерация не удалась.\n{res.get('error_message') or ''}",
+                    reply_markup=get_video_mode_keyboard())
+            except Exception: pass
+            release_user(user_id)
+            return
+
+        if status == "completed":
+            _finalize_video_job(job_row)
+            return
+
+        # Неизвестный статус — не снимаем lock, пусть TTL сам
+        logger.warning("Unknown video status: %s for job=%s", status, job_uuid)
+
+    except Exception as e:
+        logger.exception("❌ _poll_video_job unexpected error: %s", e)
+        # При неожиданной ошибке — снимаем lock, чтобы юзер не завис
         try:
-            safe_send_message(job_row["chat_id"],
-                f"❌ Генерация не удалась.\n{res.get('error_message') or ''}",
-                reply_markup=get_video_mode_keyboard())
-        finally:
-            release_user(job_row["user_id"])
-        return
-    if status == "completed":
-        _finalize_video_job(job_row)
+            release_user(user_id)
+        except Exception: pass
 
 
 def video_poller_loop():
@@ -1362,7 +1421,6 @@ def video_poller_loop():
                 ORDER BY next_poll_at ASC LIMIT 50
             """, (now,)).fetchall()
             for r in rows:
-                # Сдвигаем next_poll_at, чтобы другой worker не взял тот же job
                 with db_tx() as c:
                     c.execute("UPDATE generation_jobs SET next_poll_at=? WHERE job_uuid=?",
                               (now + VIDEO_POLL_INTERVAL, r[0]))
@@ -1429,8 +1487,11 @@ def cmd_admin(message):
     if not require_admin(message): return
     safe_send_message(message.chat.id,
         "🛠 *Админ-режим*\n\n"
-        "/users — последние\n/user ID — баланс\n"
-        "/addtokens ID AMOUNT — начислить")
+        "/users — последние\n"
+        "/user ID — баланс\n"
+        "/addtokens ID AMOUNT — начислить\n"
+        "/locks — активные блокировки\n"
+        "/unlock [ID] — снять блокировку")
 
 
 @bot.message_handler(commands=["user"])
@@ -1483,6 +1544,62 @@ def cmd_addtokens(message):
             reply_markup=get_main_keyboard())
     except Exception as e:
         logger.warning("notify %s: %s", uid, e)
+
+
+@bot.message_handler(commands=["locks"])
+def cmd_locks(message):
+    """Список активных lock'ов."""
+    if not require_admin(message): return
+    try:
+        rows = _get_conn().execute("""
+            SELECT user_id, locked_at, reason FROM user_locks
+            ORDER BY locked_at DESC LIMIT 50
+        """).fetchall()
+        if not rows:
+            safe_send_message(message.chat.id, "✅ Активных lock'ов нет.")
+            return
+
+        now = time.time()
+        lines = ["🔒 *Активные lock'и:*\n"]
+        for uid, locked_at, reason in rows:
+            age = int(now - locked_at)
+            mins, secs = divmod(age, 60)
+            lines.append(f"`{uid}` — {mins}м {secs}с назад — {reason or '—'}")
+        safe_send_message(message.chat.id, "\n".join(lines))
+    except Exception as e:
+        safe_send_message(message.chat.id, f"Ошибка: {e}")
+
+
+@bot.message_handler(commands=["unlock"])
+def cmd_unlock(message):
+    """Админская команда: снять lock пользователя или все lock'и."""
+    if not require_admin(message): return
+
+    parts = message.text.strip().split()
+    if len(parts) == 1:
+        # /unlock без аргументов → снять все lock'и
+        try:
+            with db_tx() as c:
+                cur = c.execute("SELECT COUNT(*) FROM user_locks")
+                count_before = cur.fetchone()[0]
+                c.execute("DELETE FROM user_locks")
+            safe_send_message(message.chat.id,
+                f"🔓 Сняты все lock'и: *{count_before}*")
+        except Exception as e:
+            safe_send_message(message.chat.id, f"Ошибка: {e}")
+        return
+
+    if len(parts) == 2 and parts[1].isdigit():
+        target = int(parts[1])
+        release_user(target)
+        safe_send_message(message.chat.id,
+            f"🔓 Lock снят для пользователя `{target}`")
+        return
+
+    safe_send_message(message.chat.id,
+        "Использование:\n"
+        "`/unlock` — снять все lock'и\n"
+        "`/unlock USER_ID` — снять lock конкретного юзера")
 
 
 @bot.message_handler(func=lambda m: m.text == BTN_RESET)
@@ -1673,7 +1790,7 @@ def handle_text(message):
 
 
 # ============================================================
-# FLASK WEBHOOK — отвечает сразу, задачи в executor
+# FLASK WEBHOOK
 # ============================================================
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
@@ -1688,11 +1805,7 @@ def webhook():
             return "", 200
 
         logger.info("📨 Webhook: received update_id=%s", update.update_id)
-
-        # КРИТИЧНО: прямой вызов, без executor!
-        # TeleBot threaded=False → хендлеры вызываются в этом же потоке
         bot.process_new_updates([update])
-
         logger.info("✅ Webhook: processed update_id=%s", update.update_id)
     except Exception:
         logger.exception("❌ Webhook handler error")
@@ -1735,15 +1848,16 @@ def setup_webhook():
 
 
 # ============================================================
-# STARTUP
+# BACKGROUND WORKERS
 # ============================================================
 def cleanup_old_files_loop():
-    """Удаляет файлы старше 2 часов из generated_*."""
+    """Удаляет файлы старше 2 часов из generated_* и протухшие lock'и."""
     while True:
         try:
             now = time.time()
             cutoff = now - 2 * 60 * 60  # 2 часа
 
+            # Очистка файлов
             for folder in (GENERATED_DIR, GENERATED_VIDEOS_DIR):
                 try:
                     for name in os.listdir(folder):
@@ -1756,6 +1870,9 @@ def cleanup_old_files_loop():
                             logger.warning("cleanup item err %s: %s", path, e)
                 except Exception as e:
                     logger.warning("cleanup folder err %s: %s", folder, e)
+
+            # Очистка протухших lock'ов
+            cleanup_stale_locks()
         except Exception as e:
             logger.exception("cleanup loop err: %s", e)
         time.sleep(30 * 60)  # каждые 30 минут
@@ -1768,9 +1885,8 @@ def start_background_workers():
     t2.start()
 
 
-# Инициализация при импорте (для gunicorn)
 # ============================================================
-# STARTUP — выполняется один раз при импорте модуля
+# STARTUP
 # ============================================================
 _initialized = False
 _init_lock = threading.Lock()
@@ -1807,7 +1923,6 @@ def _initialize_once():
             raise
 
 
-# Вызов при импорте — однократно защищён _init_lock
 _initialize_once()
 
 
