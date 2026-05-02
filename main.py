@@ -675,9 +675,33 @@ def safe_send_document(chat_id, file_path, caption=None, parse_mode=None):
     with open(file_path, "rb") as f:
         return _tg_call(bot.send_document, chat_id, document=f, caption=caption, parse_mode=parse_mode)
 
-def safe_send_video(chat_id, file_path, caption=None, parse_mode=None):
+def safe_send_video(chat_id, file_path, caption=None, parse_mode=None,
+                    supports_streaming=True, width=None, height=None, duration=None):
+    """Отправка видео с проверками и детальным логированием."""
+    # Проверка существования файла
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Video file not found: {file_path}")
+
+    size_bytes = os.path.getsize(file_path)
+    size_mb = size_bytes / (1024 * 1024)
+    logger.info("📹 Sending video: %s (%.2f MB)", file_path, size_mb)
+
+    # Telegram Bot API limit: 50 MB для видео
+    if size_bytes > 50 * 1024 * 1024:
+        raise ValueError(f"Video too large: {size_mb:.2f} MB (max 50 MB)")
+
+    # Проверка что файл не пустой / не битый
+    if size_bytes < 1024:
+        raise ValueError(f"Video file too small (likely broken): {size_bytes} bytes")
+
     with open(file_path, "rb") as f:
-        return _tg_call(bot.send_video, chat_id, f, caption=caption, parse_mode=parse_mode)
+        return _tg_call(
+            bot.send_video, chat_id, f,
+            caption=caption,
+            parse_mode=parse_mode,
+            supports_streaming=supports_streaming,
+            timeout=120,  # увеличенный таймаут для больших файлов
+        )
 
 
 def safe_edit_message(chat_id, message_id, text, reply_markup=None):
@@ -833,22 +857,75 @@ def poll_openrouter_video(polling_url):
 
 
 def download_openrouter_video_content(gen_id, index=0, prefix="kling"):
+    """Скачивание с валидацией размера и retry."""
     fn = f"{prefix}_{int(time.time())}_{uuid.uuid4().hex[:8]}.mp4"
     fp = os.path.join(GENERATED_VIDEOS_DIR, fn)
     url = f"https://openrouter.ai/api/v1/videos/{gen_id}/content?index={index}"
-    try:
-        with HTTP.get(url, headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
-                      timeout=300, stream=True) as r:
-            if r.status_code != 200:
-                logger.error("video dl %s: %s", r.status_code, r.text[:200])
-                return None
-            with open(fp, "wb") as f:
-                for chunk in r.iter_content(chunk_size=1 << 16):
-                    if chunk: f.write(chunk)
-        return fp
-    except Exception as e:
-        logger.exception("video dl err: %s", e)
-        return None
+
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            logger.info("📥 Downloading video (attempt %d/%d): gen_id=%s",
+                        attempt + 1, max_attempts, gen_id)
+            with HTTP.get(url,
+                          headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
+                          timeout=600,  # 10 минут на скачивание
+                          stream=True) as r:
+                if r.status_code != 200:
+                    logger.error("video dl status=%d: %s", r.status_code, r.text[:200])
+                    if attempt < max_attempts - 1:
+                        time.sleep(3 * (attempt + 1))
+                        continue
+                    return None
+
+                # Content-Length для проверки
+                expected_size = int(r.headers.get("Content-Length", 0))
+                logger.info("📏 Expected size: %d bytes (%.2f MB)",
+                            expected_size, expected_size / (1024 * 1024))
+
+                bytes_written = 0
+                with open(fp, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=1 << 16):
+                        if chunk:
+                            f.write(chunk)
+                            bytes_written += len(chunk)
+
+                logger.info("📥 Downloaded: %d bytes (%.2f MB)",
+                            bytes_written, bytes_written / (1024 * 1024))
+
+                # Валидация: файл должен быть хотя бы ~10KB и совпадать с Content-Length
+                if bytes_written < 10 * 1024:
+                    logger.error("Downloaded file too small: %d bytes", bytes_written)
+                    try: os.remove(fp)
+                    except Exception: pass
+                    if attempt < max_attempts - 1:
+                        time.sleep(3 * (attempt + 1))
+                        continue
+                    return None
+
+                if expected_size > 0 and abs(bytes_written - expected_size) > 1024:
+                    logger.error("Size mismatch: got %d, expected %d",
+                                 bytes_written, expected_size)
+                    try: os.remove(fp)
+                    except Exception: pass
+                    if attempt < max_attempts - 1:
+                        time.sleep(3 * (attempt + 1))
+                        continue
+                    return None
+
+                return fp
+
+        except requests.exceptions.Timeout:
+            logger.warning("Video download timeout on attempt %d", attempt + 1)
+            if attempt < max_attempts - 1:
+                time.sleep(5 * (attempt + 1))
+        except Exception as e:
+            logger.exception("Video download error on attempt %d: %s", attempt + 1, e)
+            if attempt < max_attempts - 1:
+                time.sleep(3 * (attempt + 1))
+
+    logger.error("❌ All %d download attempts failed for gen_id=%s", max_attempts, gen_id)
+    return None
 
 
 # ============================================================
@@ -1126,7 +1203,7 @@ def submit_video_job(message):
 # VIDEO BACKGROUND POLLER
 # ============================================================
 def _finalize_video_job(job_row):
-    """Скачивает видео, отправляет, списывает."""
+    """Скачивает видео, отправляет, списывает. С fallback на document."""
     job_uuid = job_row["job_uuid"]
     user_id = job_row["user_id"]
     chat_id = job_row["chat_id"]
@@ -1134,35 +1211,102 @@ def _finalize_video_job(job_row):
     cost = job_row["cost"]
     gen_id = job_row["provider_generation_id"]
     try:
+        # === 1. Скачивание ===
         fp = download_openrouter_video_content(
             gen_id, 0,
             prefix="kling_photo" if job_row["flow"] == "photo_plus_prompt" else "kling_text")
+
         if not fp:
             update_generation_job(job_uuid, status="failed", error_text="download_failed")
-            safe_send_message(chat_id, "❌ Не удалось скачать видео.",
-                              reply_markup=get_video_mode_keyboard()); return
+            safe_send_message(chat_id,
+                "❌ Не удалось скачать готовое видео с сервера. Токены не списаны.",
+                reply_markup=get_video_mode_keyboard())
+            return
+
+        # === 2. Валидация скачанного файла ===
+        if not os.path.exists(fp) or os.path.getsize(fp) < 10 * 1024:
+            update_generation_job(job_uuid, status="failed", error_text="file_corrupted")
+            safe_send_message(chat_id,
+                "❌ Скачанный файл повреждён. Токены не списаны, попробуй ещё раз.",
+                reply_markup=get_video_mode_keyboard())
+            try:
+                if os.path.exists(fp):
+                    os.remove(fp)
+            except Exception: pass
+            return
+
+        file_size_mb = os.path.getsize(fp) / (1024 * 1024)
+        logger.info("📦 Video downloaded: %s (%.2f MB)", fp, file_size_mb)
         update_generation_job(job_uuid, status="completed", file_path=fp)
 
+        # === 3. Попытка 1: send_video ===
+        video_sent = False
+        send_error = None
         try:
-            safe_send_video(chat_id, fp,
-                caption=f"🎬 Готово\nМодель: *{VIDEO_MODELS.get(model,model)}*",
-                parse_mode="Markdown")
+            # Caption БЕЗ Markdown — чтобы избежать parse ошибок
+            safe_send_video(
+                chat_id, fp,
+                caption=f"🎬 Видео готово ({file_size_mb:.1f} MB)",
+                parse_mode=None,
+                supports_streaming=True,
+            )
+            video_sent = True
+            logger.info("✅ Video sent via send_video")
         except Exception as e:
-            update_generation_job(job_uuid, status="failed", error_text=f"send:{e}")
-            safe_send_message(chat_id, "❌ Готово, но отправить не удалось.",
-                              reply_markup=get_video_mode_keyboard()); return
+            send_error = e
+            logger.warning("send_video failed, trying send_document: %s", e)
 
+        # === 4. Попытка 2: send_document (если первая не сработала) ===
+        if not video_sent:
+            try:
+                safe_send_document(
+                    chat_id, fp,
+                    caption=f"🎬 Видео готово ({file_size_mb:.1f} MB)\n📎 Отправлено как файл",
+                    parse_mode=None,
+                )
+                video_sent = True
+                logger.info("✅ Video sent via send_document")
+            except Exception as e:
+                logger.exception("send_document also failed: %s", e)
+                send_error = e
+
+        # === 5. Если обе попытки упали — не списываем, пишем пользователю ===
+        if not video_sent:
+            err_text = str(send_error)[:300]
+            update_generation_job(job_uuid, status="failed",
+                                  error_text=f"send_failed: {err_text}")
+            logger.error("❌ Both send methods failed for job=%s: %s", job_uuid, err_text)
+            safe_send_message(chat_id,
+                f"❌ Видео сгенерировано ({file_size_mb:.1f} MB), но не удалось отправить его в Telegram.\n\n"
+                f"Возможные причины:\n"
+                f"• Файл слишком большой для Telegram (максимум 50 MB)\n"
+                f"• Временный сбой Telegram API\n\n"
+                f"💰 Токены не списаны. Попробуй позже или выбери 5-секундное видео.",
+                reply_markup=get_video_mode_keyboard())
+            return
+
+        # === 6. Всё отправлено — списываем токены ===
         ok, _, ch = consume_tokens(user_id, cost)
         if not ok:
             update_generation_job(job_uuid, status="failed", error_text="charge_failed")
             safe_send_message(chat_id,
-                f"⚠️ Отправлено, но списание не прошло.\n{balance_line(user_id)}",
-                reply_markup=get_video_mode_keyboard()); return
+                f"⚠️ Видео отправлено, но не удалось списать токены.\n{balance_line(user_id)}",
+                reply_markup=get_video_mode_keyboard())
+            return
 
         update_generation_job(job_uuid, status="delivered", charged=1)
         safe_send_message(chat_id,
             f"Готово. 💸 Списано *{ch}* {TOKEN_EMOJI}\n{balance_line(user_id)}",
             parse_mode="Markdown", reply_markup=get_video_mode_keyboard())
+
+    except Exception as e:
+        logger.exception("❌ Unexpected error in _finalize_video_job: %s", e)
+        update_generation_job(job_uuid, status="failed", error_text=f"unexpected: {str(e)[:200]}")
+        try:
+            safe_send_message(chat_id,
+                "❌ Произошла непредвиденная ошибка при обработке видео. Токены не списаны.",
+                reply_markup=get_video_mode_keyboard())
+        except Exception: pass
     finally:
         release_user(user_id)
 
@@ -1593,9 +1737,35 @@ def setup_webhook():
 # ============================================================
 # STARTUP
 # ============================================================
+def cleanup_old_files_loop():
+    """Удаляет файлы старше 2 часов из generated_*."""
+    while True:
+        try:
+            now = time.time()
+            cutoff = now - 2 * 60 * 60  # 2 часа
+
+            for folder in (GENERATED_DIR, GENERATED_VIDEOS_DIR):
+                try:
+                    for name in os.listdir(folder):
+                        path = os.path.join(folder, name)
+                        try:
+                            if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                                os.remove(path)
+                                logger.info("🧹 Cleaned up: %s", path)
+                        except Exception as e:
+                            logger.warning("cleanup item err %s: %s", path, e)
+                except Exception as e:
+                    logger.warning("cleanup folder err %s: %s", folder, e)
+        except Exception as e:
+            logger.exception("cleanup loop err: %s", e)
+        time.sleep(30 * 60)  # каждые 30 минут
+
+
 def start_background_workers():
-    t = threading.Thread(target=video_poller_loop, name="video-poller", daemon=True)
-    t.start()
+    t1 = threading.Thread(target=video_poller_loop, name="video-poller", daemon=True)
+    t1.start()
+    t2 = threading.Thread(target=cleanup_old_files_loop, name="file-cleaner", daemon=True)
+    t2.start()
 
 
 # Инициализация при импорте (для gunicorn)
