@@ -73,9 +73,9 @@ os.makedirs(GENERATED_VIDEOS_DIR, exist_ok=True)
 # ============================================================
 # КНОПКИ ГЛАВНОГО МЕНЮ
 # ============================================================
-BTN_AI    = "🧠 Текст"
-BTN_PHOTO = "🖼 Фото модели"
-BTN_VIDEO = "🎬 Видео модели"
+BTN_AI    = "🧠 GPT┃Gemini┃Claude"
+BTN_PHOTO = "🖼 Photo модели"
+BTN_VIDEO = "🎬 Video модели"
 BTN_BALANCE = "📊 Баланс"
 BTN_TOPUP   = "💳 Пополнение"
 BTN_RESET   = "🔄 Сброс"
@@ -754,7 +754,7 @@ def get_image_models_keyboard(current_model_id: str = ""):
         mark = "✅ " if model_id == current_model_id else ""
         kb.add(types.InlineKeyboardButton(
             f"{mark}{cfg['emoji']} {cfg['name']} "
-            f"— {cfg['cost_text']}/{cfg['cost_photo']} {TOKEN_EMOJI}  {cfg.get('description','')}",
+            f"— {cfg['cost_text']}-{cfg['cost_photo']} {TOKEN_EMOJI}  
             callback_data=f"imgmodel:{model_id}"
         ))
     return kb
