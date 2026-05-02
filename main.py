@@ -753,9 +753,8 @@ def get_image_models_keyboard(current_model_id: str = ""):
     for model_id, cfg in IMAGE_MODELS_CONFIG.items():
         mark = "✅ " if model_id == current_model_id else ""
         kb.add(types.InlineKeyboardButton(
-            f'{mark}{cfg["emoji"]} {cfg["name"]}'
-            f'— {cfg["cost_text"]}-{cfg["cost_photo"]} {TOKEN_EMOJI}  
-            callback_data=f"imgmodel:{model_id}'
+            f'{mark}{cfg["emoji"]} {cfg["name"]} — {cfg["cost_text"]}-{cfg["cost_photo"]} {TOKEN_EMOJI}',
+            callback_data=f"imgmodel:{model_id}"
         ))
     return kb
 
