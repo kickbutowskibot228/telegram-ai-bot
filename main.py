@@ -2129,21 +2129,6 @@ def handle_photo(message):
     func=lambda m: bool(m.text) and not m.text.startswith("/") and m.text not in MENU_BUTTONS,
     content_types=["text"]
 )
-def handle_text_message(message):
-    logger.info("text user=%s text=%.50r", message.from_user.id, message.text)
-    if not message.text or message.text.startswith("/"):
-        return
-    uid = message.from_user.id
-    if not check_rate(uid, message.chat.id):
-        return
-    d = get_user_data(uid)
-    if d["video_mode"]:
-        submit_task(submit_video_job, message)
-        return
-    if d["image_mode"]:
-        submit_task(process_nano_request, message)
-        return
-    submit_task(process_text_question, message)
 def handle_text(message):
     logger.info("💬 text: user=%s text=%r",
                 message.from_user.id, (message.text or "")[:50])
