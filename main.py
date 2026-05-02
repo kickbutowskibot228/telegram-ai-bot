@@ -59,7 +59,7 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown", threaded=False)
 app = Flask(__name__)
 
 DB_PATH = "bot.db"
-FREE_TOKENS = 40
+FREE_TOKENS = 100
 FREE_RESET_COOLDOWN_DAYS = 3
 TOKEN_EMOJI = "🍼"
 GENERATED_DIR = "generated_images"
@@ -95,31 +95,31 @@ SUPPORT_URL = f"https://t.me/{SUPPORT_USERNAME}"
 TEXT_MODELS_CONFIG = {
     "google/gemini-3-flash-preview": {
         "name": "Gemini 3 Flash",
-        "cost": 2,
+        "cost": 1,
         "emoji": "⚡",
         "description": "Быстрая и дешёвая",
     },
-    "openai/gpt-5.2": {
-        "name": "GPT-5.2",
-        "cost": 5,
+    "openai/gpt-5.5": {
+        "name": "GPT-5.5",
+        "cost": 1,
         "emoji": "🤖",
         "description": "Мощная модель OpenAI",
     },
     "anthropic/claude-sonnet-4.6": {
         "name": "Claude Sonnet 4.6",
-        "cost": 8,
+        "cost": 1,
         "emoji": "🎭",
         "description": "Умная и точная",
     },
     "anthropic/claude-opus-4.6": {
         "name": "Claude Opus 4.6",
-        "cost": 12,
+        "cost": 2,
         "emoji": "👑",
         "description": "Лучшая от Anthropic",
     },
     "moonshotai/kimi-k2.6": {
         "name": "Kimi 2.6",
-        "cost": 3,
+        "cost": 1,
         "emoji": "🌝",
         "description": "Moonshot AI",
     },
@@ -133,15 +133,15 @@ IMAGE_MODELS_CONFIG = {
     "google/gemini-3-pro-image-preview": {
         "name": "Nano Banana Pro",
         "emoji": "🍌",
-        "cost_text": 10,
-        "cost_photo": 12,
+        "cost_text": 15,
+        "cost_photo": 20,
         "description": "Генерация и редактирование",
     },
     "openai/gpt-5.4-image-2": {
         "name": "GPT Image-2",
         "emoji": "🖼",
         "cost_text": 15,
-        "cost_photo": 18,
+        "cost_photo": 20,
         "description": "Новейшая модель для генерации изображений от OpenAI",
     },
     # ═══ Добавить модель изображений — скопируй блок выше ═══
@@ -153,7 +153,7 @@ VIDEO_MODELS_CONFIG = {
     "kwaivgi/kling-v3.0-pro": {
         "name": "Kling V3 Pro",
         "emoji": "🎬",
-        "costs": {5: 40, 10: 70},
+        "costs": {5: 50, 10: 100},
         "description": "Качественная генерация видео",
         "max_duration": 10,
         # Формат передачи первого кадра в OpenRouter API
@@ -162,7 +162,7 @@ VIDEO_MODELS_CONFIG = {
     "minimax/hailuo-2.3": {
         "name": "MiniMax Hailuo",
         "emoji": "🆙",
-        "costs": {5: 35, 10: 60},
+        "costs": {5: 40, 10: 80},
         "description": "Быстрая альтернатива",
         "max_duration": 10,
         # MiniMax принимает image_url на верхнем уровне
@@ -171,7 +171,7 @@ VIDEO_MODELS_CONFIG = {
     "bytedance/seedance-2.0": {
         "name": "Seedance 2.0",
         "emoji": "🎥",
-        "costs": {5: 35, 10: 60},
+        "costs": {5: 50, 10: 100},
         "description": "От ByteDance",
         "max_duration": 10,
         # Seedance принимает first_frame_image отдельным полем
@@ -203,9 +203,9 @@ VIDEO_PROMPT_COSTS = {k: v["costs"] for k, v in VIDEO_MODELS_CONFIG.items()}
 DEFAULT_MODEL = DEFAULT_TEXT_MODEL
 
 PAY_PLANS = {
-    "small":  {"label": f"800 {TOKEN_EMOJI}",  "amount": 250, "tokens": 800},
-    "medium": {"label": f"1800 {TOKEN_EMOJI}", "amount": 400, "tokens": 1800},
-    "large":  {"label": f"4000 {TOKEN_EMOJI}", "amount": 750, "tokens": 4000},
+    "small":  {"label": f"100 {TOKEN_EMOJI}",  "amount": 200, "tokens": 100},
+    "medium": {"label": f"300 {TOKEN_EMOJI}", "amount": 550, "tokens": 300},
+    "large":  {"label": f"1000 {TOKEN_EMOJI}", "amount": 1500, "tokens": 1000},
 }
 
 VIDEO_POLL_INTERVAL    = 15
