@@ -81,6 +81,8 @@ BTN_TOPUP   = "💳 Пополнение"
 BTN_RESET   = "🔄 Сброс"
 BTN_SUPPORT = "🛟 Поддержка"
 
+MENU_BUTTONS = {BTN_AI, BTN_PHOTO, BTN_VIDEO, BTN_BALANCE, BTN_TOPUP, BTN_SUPPORT, BTN_RESET}
+
 SUPPORT_USERNAME = "ai_patriot_support"
 SUPPORT_URL = f"https://t.me/{SUPPORT_USERNAME}"
 
@@ -2123,7 +2125,25 @@ def handle_photo(message):
         reply_markup=get_main_keyboard())
 
 
-@bot.message_handler(content_types=["text"])
+@bot.message_handler(
+    func=lambda m: bool(m.text) and not m.text.startswith("/") and m.text not in MENU_BUTTONS,
+    content_types=["text"]
+)
+def handle_text_message(message):
+    logger.info("text user=%s text=%.50r", message.from_user.id, message.text)
+    if not message.text or message.text.startswith("/"):
+        return
+    uid = message.from_user.id
+    if not check_rate(uid, message.chat.id):
+        return
+    d = get_user_data(uid)
+    if d["video_mode"]:
+        submit_task(submit_video_job, message)
+        return
+    if d["image_mode"]:
+        submit_task(process_nano_request, message)
+        return
+    submit_task(process_text_question, message)
 def handle_text(message):
     logger.info("💬 text: user=%s text=%r",
                 message.from_user.id, (message.text or "")[:50])
