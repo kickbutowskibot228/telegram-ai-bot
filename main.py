@@ -131,7 +131,7 @@ TEXT_MODELS_CONFIG = {
 # cost_photo — редактирование фото
 IMAGE_MODELS_CONFIG = {
     "google/gemini-3-pro-image-preview": {
-        "name": "Gemini Image Pro",
+        "name": "Nano Banana Pro",
         "emoji": "🍌",
         "cost_text": 10,
         "cost_photo": 12,
@@ -156,6 +156,8 @@ VIDEO_MODELS_CONFIG = {
         "costs": {5: 40, 10: 70},
         "description": "Качественная генерация видео",
         "max_duration": 10,
+        # Формат передачи первого кадра в OpenRouter API
+        "image_input_format": "frame_images",
     },
     "minimax/hailuo-2.3": {
         "name": "MiniMax Hailuo",
@@ -163,6 +165,8 @@ VIDEO_MODELS_CONFIG = {
         "costs": {5: 35, 10: 60},
         "description": "Быстрая альтернатива",
         "max_duration": 10,
+        # MiniMax принимает image_url на верхнем уровне
+        "image_input_format": "image_url",
     },
     "bytedance/seedance-2.0": {
         "name": "Seedance 2.0",
@@ -170,6 +174,8 @@ VIDEO_MODELS_CONFIG = {
         "costs": {5: 35, 10: 60},
         "description": "От ByteDance",
         "max_duration": 10,
+        # Seedance принимает first_frame_image отдельным полем
+        "image_input_format": "first_frame_image",
     },
     # ═══ Добавить видео модель — скопируй блок выше ═══
 }
@@ -545,10 +551,31 @@ def format_timedelta_ru(delta):
     return " ".join(parts)
 
 
-def reset_free_tokens(user_id):
+def reset_free_tokens(user_id: int):
+    """
+    Сбрасывает ТОЛЬКО бесплатные токены до FREE_TOKENS.
+    Платные токены НЕ ТРОГАЕТ.
+    """
     with db_tx() as c:
-        c.execute("UPDATE users SET free_tokens=?, last_free_reset_at=? WHERE user_id=?",
-                  (FREE_TOKENS, datetime.utcnow().isoformat(), user_id))
+        # Сначала читаем текущий баланс для лога
+        row = c.execute(
+            "SELECT free_tokens, paid_tokens FROM users WHERE user_id=?",
+            (user_id,)
+        ).fetchone()
+        old_free = row[0] if row else 0
+        paid     = row[1] if row else 0
+
+        c.execute("""
+            UPDATE users
+            SET free_tokens = ?,
+                last_free_reset_at = ?
+            WHERE user_id = ?
+        """, (FREE_TOKENS, datetime.utcnow().isoformat(), user_id))
+
+        logger.info(
+            "reset_free_tokens: user=%s free %d→%d paid=%d (unchanged)",
+            user_id, old_free, FREE_TOKENS, paid
+        )
     user_cache.invalidate(user_id)
 
 
@@ -951,24 +978,104 @@ def generate_image_openrouter(model, prompt_text, input_image_data_url=None, max
 
 def submit_openrouter_video_generation(model, prompt, duration=5, aspect_ratio="16:9",
                                        input_image_data_url=None):
+    """
+    Отправляет запрос на генерацию видео в OpenRouter.
+
+    Формат передачи первого кадра (image-to-video) зависит от модели
+    и берётся из VIDEO_MODELS_CONFIG[model]["image_input_format"].
+
+    Поддерживаемые форматы:
+      "frame_images"      — Kling: поле frame_images[] с frame_type=first_frame
+      "image_url"         — MiniMax: поле image_url на верхнем уровне payload
+      "first_frame_image" — Seedance: поле first_frame_image на верхнем уровне
+      "none" / отсутствует — модель не поддерживает image-to-video
+    """
     url     = "https://openrouter.ai/api/v1/videos"
-    payload = {"model": model, "prompt": prompt,
-               "duration": duration, "aspect_ratio": aspect_ratio}
+    payload = {
+        "model":        model,
+        "prompt":       prompt,
+        "duration":     duration,
+        "aspect_ratio": aspect_ratio,
+    }
+
+    # Добавляем фото в нужном формате если оно передано
     if input_image_data_url:
-        payload["frame_images"] = [{
-            "type": "image_url",
-            "image_url": {"url": input_image_data_url},
-            "frame_type": "first_frame",
-        }]
+        model_cfg    = VIDEO_MODELS_CONFIG.get(model, {})
+        img_format   = model_cfg.get("image_input_format", "frame_images")
+
+        if img_format == "frame_images":
+            # Kling и совместимые
+            payload["frame_images"] = [{
+                "type":       "image_url",
+                "image_url":  {"url": input_image_data_url},
+                "frame_type": "first_frame",
+            }]
+
+        elif img_format == "image_url":
+            # MiniMax Hailuo
+            payload["image_url"] = input_image_data_url
+
+        elif img_format == "first_frame_image":
+            # Seedance
+            payload["first_frame_image"] = input_image_data_url
+
+        elif img_format == "none":
+            # Модель не поддерживает image-to-video — предупреждаем и продолжаем без фото
+            logger.warning(
+                "Model %s does not support image-to-video, ignoring photo", model
+            )
+
+        else:
+            # Неизвестный формат — пробуем frame_images как fallback
+            logger.warning(
+                "Unknown image_input_format '%s' for model %s, using frame_images as fallback",
+                img_format, model
+            )
+            payload["frame_images"] = [{
+                "type":       "image_url",
+                "image_url":  {"url": input_image_data_url},
+                "frame_type": "first_frame",
+            }]
+
+    logger.info(
+        "Video submit: model=%s duration=%s ar=%s has_image=%s format=%s",
+        model, duration, aspect_ratio,
+        bool(input_image_data_url),
+        VIDEO_MODELS_CONFIG.get(model, {}).get("image_input_format", "frame_images")
+            if input_image_data_url else "n/a"
+    )
+
     try:
         r = HTTP.post(url, headers=OPENROUTER_HEADERS, json=payload, timeout=60)
+
         if r.status_code not in (200, 202):
-            logger.error("OR video submit %s: %s", r.status_code, r.text[:300])
-            return {"ok": False, "error": "Не удалось поставить видео в очередь."}
+            # Детальное логирование ошибки для диагностики
+            logger.error(
+                "OR video submit error: model=%s status=%d body=%s",
+                model, r.status_code, r.text[:500]
+            )
+            # Пытаемся извлечь читаемую причину из ответа
+            try:
+                err_body = r.json()
+                err_msg  = (err_body.get("error", {}).get("message")
+                            or err_body.get("message")
+                            or r.text[:200])
+            except Exception:
+                err_msg = r.text[:200]
+
+            return {"ok": False, "error": f"Ошибка API: {err_msg}"}
+
         d = r.json()
-        return {"ok": True, "id": d.get("id"),
-                "polling_url": d.get("polling_url"),
-                "status": d.get("status", "pending")}
+        return {
+            "ok":          True,
+            "id":          d.get("id"),
+            "polling_url": d.get("polling_url"),
+            "status":      d.get("status", "pending"),
+        }
+
+    except requests.exceptions.Timeout:
+        logger.error("OR video submit timeout: model=%s", model)
+        return {"ok": False, "error": "Таймаут при запуске генерации. Попробуй ещё раз."}
     except Exception as e:
         logger.exception("submit video err: %s", e)
         return {"ok": False, "error": "Ошибка при запуске генерации видео."}
@@ -1242,10 +1349,20 @@ def submit_video_job(message):
     try:
         d          = get_user_data(user_id)
         model      = d["video_model"]
+        model_cfg  = VIDEO_MODELS_CONFIG.get(model, {})
         model_name = VIDEO_MODELS.get(model, model)
         dur, ar    = d["video_duration"], d["video_aspect_ratio"]
         cost       = get_video_cost(model, dur)
         is_photo   = (message.content_type == "photo")
+
+        # ── Проверка: модель поддерживает image-to-video? ──────────────────
+        if is_photo and model_cfg.get("image_input_format", "frame_images") == "none":
+            safe_send_message(message.chat.id,
+                f"⚠️ Модель *{model_name}* не поддерживает генерацию видео по фото.\n\n"
+                f"Отправь текстовый запрос или выбери другую модель.",
+                reply_markup=get_main_keyboard())
+            return
+        # ───────────────────────────────────────────────────────────────────
 
         if is_photo:
             flow   = "photo_plus_prompt"
@@ -1286,7 +1403,8 @@ def submit_video_job(message):
         res = submit_openrouter_video_generation(model, prompt, dur, ar, input_img)
         if not res["ok"]:
             update_generation_job(job, status="failed", error_text=res["error"])
-            safe_edit_message(message.chat.id, wait.message_id, f"❌ {res['error']}")
+            safe_edit_message(message.chat.id, wait.message_id,
+                f"❌ {res['error']}")
             return
 
         update_generation_job(job, status="submitted",
@@ -1483,10 +1601,11 @@ def video_poller_loop():
 def cmd_start(message):
     logger.info("🚀 /start user=%s", message.from_user.id)
     uid = message.from_user.id
-    ensure_user(uid)
-    clear_chat_history(uid)
-    clear_image_state(uid)
-    clear_video_state(uid)
+    ensure_user(uid)          # создаёт пользователя если нет
+    clear_chat_history(uid)   # очищает историю чата
+    clear_image_state(uid)    # сбрасывает режим изображений
+    clear_video_state(uid)    # сбрасывает режим видео
+    # НЕТ reset_free_tokens здесь!
     safe_send_message(message.chat.id,
         "Я Patriot AI 🦸🏼‍♂️\n\n"
         f"*{BTN_AI}* — текстовые модели\n"
@@ -1497,16 +1616,37 @@ def cmd_start(message):
 
 @bot.message_handler(commands=["restart"])
 def cmd_restart(message):
-    uid    = message.from_user.id
+    uid = message.from_user.id
     ok, wait = can_reset_free_tokens(uid)
     if not ok:
         safe_send_message(message.chat.id,
-            f"⏳ Сброс раз в *{FREE_RESET_COOLDOWN_DAYS}* дня.\n"
-            f"Осталось: *{format_timedelta_ru(wait)}*",
-            reply_markup=get_main_keyboard()); return
+            f"⏳ Бесплатные токены можно сбрасывать раз в *{FREE_RESET_COOLDOWN_DAYS}* дня.\n\n"
+            f"Попробуй снова через: *{format_timedelta_ru(wait)}*",
+            reply_markup=get_main_keyboard())
+        return
+
+    # Запоминаем платные ДО сброса — чтобы показать в сообщении
+    d_before   = get_user_data(uid)
+    paid_before = d_before["paid_tokens"]
+
     reset_free_tokens(uid)
+
+    d_after = get_user_data(uid)
+    total   = d_after["free_tokens"] + d_after["paid_tokens"]
+
+    # Формируем наглядное сообщение
+    lines = [
+        f"🔄 *Бесплатные токены восстановлены!*\n",
+        f"🎁 Бесплатные: *{d_after['free_tokens']}* {TOKEN_EMOJI} _(сброшены до {FREE_TOKENS})_",
+    ]
+    if paid_before > 0:
+        lines.append(
+            f"💳 Платные: *{paid_before}* {TOKEN_EMOJI} _(не изменились)_"
+        )
+    lines.append(f"\n💰 Итоговый баланс: *{total}* {TOKEN_EMOJI}")
+
     safe_send_message(message.chat.id,
-        f"🔄 Бесплатные токены сброшены.\n\n{balance_line(uid)}",
+        "\n".join(lines),
         reply_markup=get_main_keyboard())
 
 
@@ -1657,7 +1797,50 @@ def cmd_unlock(message):
 # HANDLERS — кнопки главного меню
 # ============================================================
 @bot.message_handler(func=lambda m: m.text == BTN_RESET)
-def btn_restart(message): cmd_restart(message)
+def btn_restart(message):
+    uid = message.from_user.id
+    ok, wait = can_reset_free_tokens(uid)
+
+    if not ok:
+        safe_send_message(message.chat.id,
+            f"⏳ Бесплатные токены можно сбрасывать раз в *{FREE_RESET_COOLDOWN_DAYS}* дня.\n\n"
+            f"Попробуй снова через: *{format_timedelta_ru(wait)}*",
+            reply_markup=get_main_keyboard())
+        return
+
+    # Показываем текущий баланс и предупреждение ЧТО именно сбросится
+    d    = get_user_data(uid)
+    free = d["free_tokens"]
+    paid = d["paid_tokens"]
+
+    lines = [
+        f"🔄 *Сброс бесплатных токенов*\n",
+        f"Текущий баланс:",
+        f"  🎁 Бесплатные: *{free}* {TOKEN_EMOJI}",
+    ]
+    if paid > 0:
+        lines.append(f"  💳 Платные: *{paid}* {TOKEN_EMOJI}")
+    lines += [
+        f"\nПосле сброса:",
+        f"  🎁 Бесплатные станут: *{FREE_TOKENS}* {TOKEN_EMOJI}",
+    ]
+    if paid > 0:
+        lines.append(f"  💳 Платные останутся: *{paid}* {TOKEN_EMOJI} _(не изменятся)_")
+
+    # Inline-кнопка подтверждения
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton(
+        f"✅ Да, сбросить бесплатные",
+        callback_data="confirm_reset_free"
+    ))
+    kb.add(types.InlineKeyboardButton(
+        "❌ Отмена",
+        callback_data="cancel_reset"
+    ))
+
+    safe_send_message(message.chat.id,
+        "\n".join(lines),
+        reply_markup=kb)
 
 
 @bot.message_handler(func=lambda m: m.text == BTN_BALANCE)
@@ -1863,6 +2046,56 @@ def callback_payplan(call):
     safe_edit_message(call.message.chat.id, call.message.message_id,
         f"💳 *{PAY_PLANS[pk]['label']}* — *{PAY_PLANS[pk]['amount']} ₽*")
     safe_send_message(call.message.chat.id, "Ссылка на оплату:", reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "confirm_reset_free")
+def callback_confirm_reset(call):
+    uid = call.from_user.id
+    ok, wait = can_reset_free_tokens(uid)
+
+    if not ok:
+        bot.answer_callback_query(call.id, "Сброс пока недоступен")
+        safe_edit_message(call.message.chat.id, call.message.message_id,
+            f"⏳ Сброс недоступен.\nПопробуй через: *{format_timedelta_ru(wait)}*")
+        return
+
+    # Запоминаем платные ДО сброса
+    d_before    = get_user_data(uid)
+    paid_before = d_before["paid_tokens"]
+
+    reset_free_tokens(uid)
+    bot.answer_callback_query(call.id, "✅ Бесплатные токены восстановлены!")
+
+    d_after = get_user_data(uid)
+    total   = d_after["free_tokens"] + d_after["paid_tokens"]
+
+    lines = [
+        f"✅ *Бесплатные токены восстановлены!*\n",
+        f"🎁 Бесплатные: *{FREE_TOKENS}* {TOKEN_EMOJI}",
+    ]
+    if paid_before > 0:
+        lines.append(
+            f"💳 Платные: *{paid_before}* {TOKEN_EMOJI} _(не изменились)_"
+        )
+    lines.append(f"\n💰 Итоговый баланс: *{total}* {TOKEN_EMOJI}")
+
+    safe_edit_message(call.message.chat.id, call.message.message_id,
+        "\n".join(lines))
+
+    # Отправляем клавиатуру отдельным сообщением
+    safe_send_message(call.message.chat.id,
+        "Выбери действие:",
+        reply_markup=get_main_keyboard())
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "cancel_reset")
+def callback_cancel_reset(call):
+    bot.answer_callback_query(call.id, "Отменено")
+    safe_edit_message(call.message.chat.id, call.message.message_id,
+        "❌ Сброс отменён.")
+    safe_send_message(call.message.chat.id,
+        "Выбери действие:",
+        reply_markup=get_main_keyboard())
 
 
 # ============================================================
