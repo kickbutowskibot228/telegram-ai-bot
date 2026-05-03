@@ -771,10 +771,10 @@ def get_video_models_keyboard(current_model_id: str = ""):
     for model_id, cfg in VIDEO_MODELS_CONFIG.items():
         mark = "✅ " if model_id == current_model_id else ""
         costs_str = "-".join(str(c) for c in cfg["costs"].values()) + TOKEN_EMOJI
-kb.add(types.InlineKeyboardButton(
-    f"{mark}{cfg['emoji']} {cfg['name']}: {costs_str}",
-    callback_data=f"videomodel:{model_id}"
-))
+        kb.add(types.InlineKeyboardButton(
+            f"{mark}{cfg['emoji']} {cfg['name']}: {costs_str}",
+            callback_data=f"videomodel:{model_id}"
+        ))
     return kb
 
 
