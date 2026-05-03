@@ -109,13 +109,13 @@ TEXT_MODELS_CONFIG = {
     },
     "anthropic/claude-sonnet-4.6": {
         "name": "Claude Sonnet 4.6",
-        "cost": 1,
+        "cost": 2,
         "emoji": "🎭",
         "description": "Умная и точная",
     },
     "anthropic/claude-opus-4.6": {
         "name": "Claude Opus 4.6",
-        "cost": 2,
+        "cost": 7,
         "emoji": "👑",
         "description": "Лучшая от Anthropic",
     },
@@ -155,7 +155,7 @@ VIDEO_MODELS_CONFIG = {
     "kwaivgi/kling-v3.0-pro": {
         "name": "Kling V3 Pro",
         "emoji": "🎬",
-        "costs": {5: 50, 10: 100},
+        "costs": {5: 100, 10: 200},
         "description": "Качественная генерация видео",
         "max_duration": 10,
         # Формат передачи первого кадра в OpenRouter API
@@ -164,7 +164,7 @@ VIDEO_MODELS_CONFIG = {
     "minimax/hailuo-2.3": {
         "name": "MiniMax Hailuo",
         "emoji": "🆙",
-        "costs": {5: 40, 10: 80},
+        "costs": {5: 50, 10: 100},
         "description": "Быстрая альтернатива",
         "max_duration": 10,
         # MiniMax принимает image_url на верхнем уровне
@@ -173,7 +173,7 @@ VIDEO_MODELS_CONFIG = {
     "bytedance/seedance-2.0": {
         "name": "Seedance 2.0",
         "emoji": "🎥",
-        "costs": {5: 50, 10: 100},
+        "costs": {5: 105, 10: 205},
         "description": "От ByteDance",
         "max_duration": 10,
         # Seedance принимает first_frame_image отдельным полем
@@ -205,9 +205,10 @@ VIDEO_PROMPT_COSTS = {k: v["costs"] for k, v in VIDEO_MODELS_CONFIG.items()}
 DEFAULT_MODEL = DEFAULT_TEXT_MODEL
 
 PAY_PLANS = {
-    "small":  {"label": f"100 {TOKEN_EMOJI}",  "amount": 200, "tokens": 100},
-    "medium": {"label": f"300 {TOKEN_EMOJI}", "amount": 550, "tokens": 300},
-    "large":  {"label": f"1000 {TOKEN_EMOJI}", "amount": 1500, "tokens": 1000},
+    "mini":  {"label": f"100 {TOKEN_EMOJI}",  "amount": 10, "tokens": 100},
+    "basic": {"label": f"300 {TOKEN_EMOJI}", "amount": 550, "tokens": 300},
+    "plus":  {"label": f"1000 {TOKEN_EMOJI}", "amount": 1850, "tokens": 1000},
+    "pro":  {"label": f"3000 {TOKEN_EMOJI}", "amount": 5500, "tokens": 3000},
 }
 
 VIDEO_POLL_INTERVAL    = 15
