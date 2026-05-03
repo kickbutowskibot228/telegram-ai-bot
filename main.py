@@ -2039,9 +2039,9 @@ def callback_video_start(call):
         reply_markup=get_video_settings_keyboard(uid))
 
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("payplan_"))
+@bot.callback_query_handler(func=lambda c: c.data.startswith("payplan:"))
 def callback_payplan(call):
-    pk = call.data.split("_", 1)[1]
+    pk = call.data.split(":", 1)[1]
     if pk not in PAY_PLANS:
         bot.answer_callback_query(call.id)
         return
