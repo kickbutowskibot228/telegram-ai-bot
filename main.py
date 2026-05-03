@@ -17,7 +17,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 import telebot
-from flask import Flask, request, abort
+from flask import Flask, request, abort, send_from_directory
 from telebot import types
 from dotenv import load_dotenv
 
@@ -1158,10 +1158,16 @@ def create_yookassa_payment(user_id, plan_key):
     payload = {
         "amount": {"value": f"{plan['amount']}.00", "currency": "RUB"},
         "capture": True,
-        "confirmation": {"type": "redirect", "return_url": YOOKASSA_RETURN_URL},
-        "description": f"Пополнение AI-бота: {plan['label']}",
-        "metadata": {"user_id": str(user_id), "plan_key": plan_key,
-                     "tokens_count": str(plan["tokens"])},
+        "confirmation": {
+            "type": "embedded"   # ← было: redirect
+            # return_url больше не нужен для embedded
+        },
+        "description": f"AI-токены: {plan['label']}",
+        "metadata": {
+            "user_id": str(user_id),
+            "plan_key": plan_key,
+            "tokens_count": str(plan['tokens'])
+        }
     }
     try:
         r = HTTP.post("https://api.yookassa.ru/v3/payments",
@@ -1169,12 +1175,12 @@ def create_yookassa_payment(user_id, plan_key):
                       headers={"Content-Type": "application/json", "Idempotence-Key": idem},
                       json=payload, timeout=30)
         if r.status_code not in (200, 201):
-            logger.error("YK %s: %s", r.status_code, r.text[:300])
             return None, None
         d = r.json()
-        create_payment_record(d["id"], idem, user_id, plan_key,
-                              plan["amount"], plan["tokens"])
-        return d["id"], d["confirmation"]["confirmation_url"]
+        # embedded возвращает confirmation_token (не url!)
+        confirmation_token = d["confirmation"]["confirmation_token"]
+        create_payment_record(d["id"], idem, user_id, plan_key, plan['amount'], plan['tokens'])
+        return d["id"], confirmation_token
     except Exception as e:
         logger.exception("YK err: %s", e)
         return None, None
@@ -2033,21 +2039,32 @@ def callback_video_start(call):
         reply_markup=get_video_settings_keyboard(uid))
 
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("payplan:"))
+@bot.callback_query_handler(func=lambda c: c.data.startswith("payplan_"))
 def callback_payplan(call):
-    pk = call.data.split(":", 1)[1]
+    pk = call.data.split("_", 1)[1]
     if pk not in PAY_PLANS:
-        bot.answer_callback_query(call.id); return
-    bot.answer_callback_query(call.id, "Создаю ссылку...")
-    _, url = create_yookassa_payment(call.from_user.id, pk)
-    if not url:
-        safe_edit_message(call.message.chat.id, call.message.message_id,
-                          "❌ Не удалось создать ссылку."); return
+        bot.answer_callback_query(call.id)
+        return
+    bot.answer_callback_query(call.id, "⏳ Создаём платёж...")
+    
+    pid, conf_token = create_yookassa_payment(call.from_user.id, pk)
+    if not conf_token:
+        safe_edit_message(call.message.chat.id, call.message.message_id, "❌ Ошибка создания платежа.")
+        return
+    
+    # Ссылка на WebApp с токеном подтверждения
+    widget_url = f"https://bot.patriotai.ru/static/payment.html?token={conf_token}"
+    
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("💳 Оплатить", url=url))
-    safe_edit_message(call.message.chat.id, call.message.message_id,
-        f"💳 *{PAY_PLANS[pk]['label']}* — *{PAY_PLANS[pk]['amount']} ₽*")
-    safe_send_message(call.message.chat.id, "Ссылка на оплату:", reply_markup=kb)
+    kb.add(types.InlineKeyboardButton(
+        "💳 Оплатить",
+        web_app=types.WebAppInfo(url=widget_url)
+    ))
+    safe_edit_message(
+        call.message.chat.id, call.message.message_id,
+        f"*{PAY_PLANS[pk]['label']}* — {PAY_PLANS[pk]['amount']} ₽\n\nВыбери способ оплаты:",
+        reply_markup=kb
+    )
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "confirm_reset_free")
@@ -2189,6 +2206,10 @@ def health():
 def index():
     return "Bot is running"
 
+
+@app.route('/static/<path:filename>')
+def static_files(filename):
+    return send_from_directory('static', filename)
 
 def setup_webhook():
     if RENDER_EXTERNAL_HOSTNAME:
