@@ -208,7 +208,7 @@ PAY_PLANS = {
     "mini":  {"label": f"100 {TOKEN_EMOJI}",  "amount": 10, "tokens": 100},
     "basic": {"label": f"300 {TOKEN_EMOJI}", "amount": 550, "tokens": 300},
     "plus":  {"label": f"1000 {TOKEN_EMOJI}", "amount": 1850, "tokens": 1000},
-    "pro":  {"label": f"3000 {TOKEN_EMOJI}", "amount": 5500, "tokens": 3000},
+    "pro":   {"label": f"3000 {TOKEN_EMOJI}", "amount": 5500, "tokens": 3000},
 }
 
 VIDEO_POLL_INTERVAL    = 15
@@ -756,7 +756,7 @@ def get_image_models_keyboard(current_model_id: str = ""):
     for model_id, cfg in IMAGE_MODELS_CONFIG.items():
         mark = "✅ " if model_id == current_model_id else ""
         kb.add(types.InlineKeyboardButton(
-            f'{mark}{cfg["emoji"]} {cfg["name"]} — {cfg["cost_text"]}-{cfg["cost_photo"]} {TOKEN_EMOJI}',
+            f'{mark}{cfg["emoji"]} {cfg["name"]}: {cfg["cost_text"]}-{cfg["cost_photo"]}{TOKEN_EMOJI}',
             callback_data=f"imgmodel:{model_id}"
         ))
     return kb
@@ -770,11 +770,11 @@ def get_video_models_keyboard(current_model_id: str = ""):
     kb = types.InlineKeyboardMarkup()
     for model_id, cfg in VIDEO_MODELS_CONFIG.items():
         mark = "✅ " if model_id == current_model_id else ""
-        costs_str = " / ".join(f"{d}с={c}{TOKEN_EMOJI}" for d, c in cfg["costs"].items())
-        kb.add(types.InlineKeyboardButton(
-            f"{mark}{cfg['emoji']} {cfg['name']} — {costs_str}  {cfg.get('description','')}",
-            callback_data=f"videomodel:{model_id}"
-        ))
+        costs_str = "-".join(str(c) for c in cfg["costs"].values()) + TOKEN_EMOJI
+kb.add(types.InlineKeyboardButton(
+    f"{mark}{cfg['emoji']} {cfg['name']}: {costs_str}",
+    callback_data=f"videomodel:{model_id}"
+))
     return kb
 
 
