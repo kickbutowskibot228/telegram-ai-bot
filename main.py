@@ -1811,6 +1811,114 @@ def cmd_unlock(message):
         "`/unlock` — все\n`/unlock USER_ID` — конкретный")
 
 
+@bot.message_handler(commands=["removetokens"])
+def admin_remove_tokens(message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    parts = message.text.split()
+    if len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
+        safe_send_message(message.chat.id, "❌ Формат: /removetokens ID AMOUNT")
+        return
+    uid, amount = int(parts[1]), int(parts[2])
+    with get_db() as db:
+        row = db.execute("SELECT balance FROM users WHERE user_id=?", (uid,)).fetchone()
+        if not row:
+            safe_send_message(message.chat.id, f"❌ Пользователь {uid} не найден")
+            return
+        new_bal = max(0, row[0] - amount)
+        db.execute("UPDATE users SET balance=? WHERE user_id=?", (new_bal, uid))
+    safe_send_message(message.chat.id,
+        f"✅ Снято {amount} токенов у {uid}\n"
+        f"Было: {row[0]} → Стало: {new_bal}")
+
+# /setbalance ID AMOUNT — установить баланс точно
+@bot.message_handler(commands=["setbalance"])
+def admin_set_balance(message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    parts = message.text.split()
+    if len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
+        safe_send_message(message.chat.id, "❌ Формат: /setbalance ID AMOUNT")
+        return
+    uid, amount = int(parts[1]), int(parts[2])
+    with get_db() as db:
+        row = db.execute("SELECT balance FROM users WHERE user_id=?", (uid,)).fetchone()
+        if not row:
+            safe_send_message(message.chat.id, f"❌ Пользователь {uid} не найден")
+            return
+        db.execute("UPDATE users SET balance=? WHERE user_id=?", (amount, uid))
+    safe_send_message(message.chat.id,
+        f"✅ Баланс {uid} установлен: {row[0]} → {amount}")
+
+# /ban ID — заблокировать пользователя
+@bot.message_handler(commands=["ban"])
+def admin_ban(message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        safe_send_message(message.chat.id, "❌ Формат: /ban ID")
+        return
+    uid = int(parts[1])
+    with get_db() as db:
+        db.execute("UPDATE users SET is_banned=1 WHERE user_id=?", (uid,))
+    safe_send_message(message.chat.id, f"🚫 Пользователь {uid} заблокирован")
+
+# /unban ID — разблокировать
+@bot.message_handler(commands=["unban"])
+def admin_unban(message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        safe_send_message(message.chat.id, "❌ Формат: /unban ID")
+        return
+    uid = int(parts[1])
+    with get_db() as db:
+        db.execute("UPDATE users SET is_banned=0 WHERE user_id=?", (uid,))
+    safe_send_message(message.chat.id, f"✅ Пользователь {uid} разблокирован")
+
+# /broadcast — рассылка всем пользователям
+@bot.message_handler(commands=["broadcast"])
+def admin_broadcast(message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    text = message.text[len("/broadcast"):].strip()
+    if not text:
+        safe_send_message(message.chat.id, "❌ Формат: /broadcast Текст сообщения")
+        return
+    with get_db() as db:
+        users = db.execute("SELECT user_id FROM users WHERE is_banned=0").fetchall()
+    sent, failed = 0, 0
+    for (uid,) in users:
+        try:
+            bot.send_message(uid, text)
+            sent += 1
+        except Exception:
+            failed += 1
+    safe_send_message(message.chat.id,
+        f"📢 Рассылка завершена\n✅ Отправлено: {sent}\n❌ Не доставлено: {failed}")
+
+# /stats — общая статистика
+@bot.message_handler(commands=["stats"])
+def admin_stats(message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    with get_db() as db:
+        total = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        banned = db.execute("SELECT COUNT(*) FROM users WHERE is_banned=1").fetchone()[0]
+        total_balance = db.execute("SELECT SUM(balance) FROM users").fetchone()[0] or 0
+        active_today = db.execute(
+            "SELECT COUNT(DISTINCT user_id) FROM messages WHERE created_at >= date('now')"
+        ).fetchone()[0]
+    safe_send_message(message.chat.id,
+        f"📊 *Статистика бота*\n\n"
+        f"👥 Всего пользователей: {total}\n"
+        f"🚫 Заблокировано: {banned}\n"
+        f"🟢 Активны сегодня: {active_today}\n"
+        f"💰 Токенов в системе: {total_balance:,}")
+
+
 # ============================================================
 # HANDLERS — кнопки главного меню
 # ============================================================
