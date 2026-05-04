@@ -2047,37 +2047,44 @@ def callback_video_start(call):
         reply_markup=get_video_settings_keyboard(uid))
 
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("payplan"))
+@bot.callback_query_handler(func=lambda c: c.data.startswith("payplan_"))
 def callback_payplan(call):
-    plankey = call.data.split("payplan", 1)[1]
-    user_id = call.from_user.id
+    userid = call.from_user.id
+    raw_data = call.data or ""
+    plankey = raw_data[len("payplan_"):].strip()
 
-    if plankey not in PAY_PLANS:
+    logger.info("payplan callback: raw=%r plankey=%r available=%s",
+                raw_data, plankey, list(PAYPLANS.keys()))
+
+    if plankey not in PAYPLANS:
         bot.answer_callback_query(call.id, "Неверный тариф")
         return
 
-    bot.answer_callback_query(call.id, "Создаю платёж...")
-    payment_id, confirmation_url = create_yookassa_payment(user_id, plankey)
+    bot.answer_callback_query(call.id, "⏳ Создаём платёж...")
 
+    payment_id, confirmation_url = createyookassapayment(userid, plankey)
     if not payment_id or not confirmation_url:
-        safe_edit_message(
+        safeeditmessage(
             call.message.chat.id,
             call.message.message_id,
-            "❌ Не удалось создать платёж."
+            "❌ Ошибка создания платежа."
         )
         return
 
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("💳 Оплатить", url=confirmation_url))
 
-    safe_edit_message(
+    safeeditmessage(
         call.message.chat.id,
         call.message.message_id,
-        f"*{PAY_PLANS[plankey]['label']}* — {PAY_PLANS[plankey]['amount']} ₽\n\n"
-        f"Нажми кнопку ниже, чтобы перейти к оплате.",
-        reply_markup=None
+        f"{PAYPLANS[plankey]['label']} — {PAYPLANS[plankey]['amount']} ₽",
+        replymarkup=None
     )
-    bot.send_message(call.message.chat.id, "Ссылка на оплату:", reply_markup=kb)
+    safesendmessage(
+        call.message.chat.id,
+        "Нажми кнопку ниже, чтобы перейти к оплате:",
+        replymarkup=kb
+    )
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "confirm_reset_free")
