@@ -1711,12 +1711,26 @@ def cmd_admin(message):
     if not require_admin(message): return
     safe_send_message(message.chat.id,
         "🛠 *Админ-режим*\n\n"
-        "/users — последние\n"
-        "/user ID — баланс\n"
+        "👤 *Пользователи:*\n"
+        "/users — последние 10 пользователей\n"
+        "/user ID — баланс и инфо\n\n"
+        "💰 *Токены:*\n"
         "/addtokens ID AMOUNT — начислить\n"
+        "/removetokens ID AMOUNT — снять\n"
+        "/setbalance ID AMOUNT — установить точно\n\n"
+        "🚫 *Модерация:*\n"
+        "/ban ID — заблокировать\n"
+        "/unban ID — разблокировать\n\n"
+        "🔒 *Блокировки:*\n"
         "/locks — активные блокировки\n"
-        "/unlock [ID] — снять блокировку\n"
-        "/models — список всех моделей")
+        "/unlock ID — снять блокировку\n\n"
+        "📢 *Рассылка:*\n"
+        "/broadcast Текст — отправить всем\n\n"
+        "📊 *Статистика:*\n"
+        "/stats — общая статистика\n"
+        "/models — список моделей",
+        parse_mode="Markdown"
+    )
 
 
 @bot.message_handler(commands=["user"])
