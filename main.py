@@ -17,7 +17,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 import telebot
-from flask import Flask, request, abort, send_from_directory
+from flask import Flask, request, abort
 from telebot import types
 from dotenv import load_dotenv
 
@@ -1153,14 +1153,16 @@ def download_openrouter_video_content(gen_id, index=0, prefix="video"):
 def create_yookassa_payment(user_id, plan_key):
     if not YOOKASSA_ENABLED or plan_key not in PAY_PLANS:
         return None, None
+
     plan = PAY_PLANS[plan_key]
     idem = str(uuid.uuid4())
+
     payload = {
         "amount": {"value": f"{plan['amount']}.00", "currency": "RUB"},
         "capture": True,
         "confirmation": {
-            "type": "embedded"   # ← было: redirect
-            # return_url больше не нужен для embedded
+            "type": "redirect",
+            "return_url": YOOKASSA_RETURN_URL
         },
         "description": f"AI-токены: {plan['label']}",
         "metadata": {
@@ -1169,18 +1171,24 @@ def create_yookassa_payment(user_id, plan_key):
             "tokens_count": str(plan['tokens'])
         }
     }
+
     try:
-        r = HTTP.post("https://api.yookassa.ru/v3/payments",
-                      auth=(YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY),
-                      headers={"Content-Type": "application/json", "Idempotence-Key": idem},
-                      json=payload, timeout=30)
+        r = HTTP.post(
+            "https://api.yookassa.ru/v3/payments",
+            auth=(YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY),
+            headers={
+                "Content-Type": "application/json",
+                "Idempotence-Key": idem
+            },
+            json=payload,
+            timeout=30
+        )
         if r.status_code not in (200, 201):
             return None, None
+
         d = r.json()
-        # embedded возвращает confirmation_token (не url!)
-        confirmation_token = d["confirmation"]["confirmation_token"]
-        create_payment_record(d["id"], idem, user_id, plan_key, plan['amount'], plan['tokens'])
-        return d["id"], confirmation_token
+        create_payment_record(d["id"], idem, user_id, plan_key, plan["amount"], plan["tokens"])
+        return d["id"], d["confirmation"]["confirmation_url"]
     except Exception as e:
         logger.exception("YK err: %s", e)
         return None, None
@@ -2039,32 +2047,37 @@ def callback_video_start(call):
         reply_markup=get_video_settings_keyboard(uid))
 
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("payplan:"))
+@bot.callback_query_handler(func=lambda c: c.data.startswith("payplan"))
 def callback_payplan(call):
-    pk = call.data.split(":", 1)[1]
-    if pk not in PAY_PLANS:
-        bot.answer_callback_query(call.id)
+    plankey = call.data.split("payplan", 1)[1]
+    user_id = call.from_user.id
+
+    if plankey not in PAY_PLANS:
+        bot.answer_callback_query(call.id, "Неверный тариф")
         return
-    bot.answer_callback_query(call.id, "⏳ Создаём платёж...")
-    
-    pid, conf_token = create_yookassa_payment(call.from_user.id, pk)
-    if not conf_token:
-        safe_edit_message(call.message.chat.id, call.message.message_id, "❌ Ошибка создания платежа.")
+
+    bot.answer_callback_query(call.id, "Создаю платёж...")
+    payment_id, confirmation_url = create_yookassa_payment(user_id, plankey)
+
+    if not payment_id or not confirmation_url:
+        safe_edit_message(
+            call.message.chat.id,
+            call.message.message_id,
+            "❌ Не удалось создать платёж."
+        )
         return
-    
-    # Ссылка на WebApp с токеном подтверждения
-    widget_url = f"https://bot.patriotai.ru/static/payment.html?token={conf_token}"
-    
+
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton(
-        "💳 Оплатить",
-        web_app=types.WebAppInfo(url=widget_url)
-    ))
+    kb.add(types.InlineKeyboardButton("💳 Оплатить", url=confirmation_url))
+
     safe_edit_message(
-        call.message.chat.id, call.message.message_id,
-        f"*{PAY_PLANS[pk]['label']}* — {PAY_PLANS[pk]['amount']} ₽\n\nВыбери способ оплаты:",
-        reply_markup=kb
+        call.message.chat.id,
+        call.message.message_id,
+        f"*{PAY_PLANS[plankey]['label']}* — {PAY_PLANS[plankey]['amount']} ₽\n\n"
+        f"Нажми кнопку ниже, чтобы перейти к оплате.",
+        reply_markup=None
     )
+    bot.send_message(call.message.chat.id, "Ссылка на оплату:", reply_markup=kb)
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "confirm_reset_free")
@@ -2205,11 +2218,6 @@ def health():
 @app.route("/", methods=["GET"])
 def index():
     return "Bot is running"
-
-
-@app.route('/static/<path:filename>')
-def static_files(filename):
-    return send_from_directory('static', filename)
 
 def setup_webhook():
     if RENDER_EXTERNAL_HOSTNAME:
