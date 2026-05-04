@@ -1922,11 +1922,13 @@ def btn_video_models(message):
         reply_markup=get_video_models_keyboard(current_model_id=d["video_model"]))
 
 
-@bot.message_handler(func=lambda m: m.text == BTN_TOPUP)
+@bot.message_handler(func=lambda m: m.text == BTN_TOPUP, content_types=['text'])
 def btn_payments(message):
-    safe_send_message(message.chat.id,
-        f"{balance_line(message.from_user.id)}\n\nВыбери пакет:",
-        reply_markup=get_payments_keyboard())
+    safesendmessage(
+        message.chat.id,
+        f"{balance_line(message.from_user.id)}\n\nВыберите пакет токенов:",
+        reply_markup=get_payments_keyboard()
+    )
 
 
 @bot.message_handler(func=lambda m: m.text == BTN_SUPPORT)
