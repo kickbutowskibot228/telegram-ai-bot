@@ -372,7 +372,7 @@ class UserCache:
         with self._lock:
             self._data.pop(key, None)
 
-user_cache = UserCache(maxsize=5000, ttl=30)
+user_cache = UserCache(maxsize=5000, ttl=120)
 
 
 # ============================================================
@@ -2190,17 +2190,16 @@ def handle_text(message):
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
     if request.headers.get("content-type") != "application/json":
-        logger.warning("Webhook: wrong content-type")
+        logger.warning("Webhook wrong content-type")
         abort(403)
     try:
-        raw    = request.get_data(as_text=True)
+        raw = request.get_data(as_text=True)
         update = telebot.types.Update.de_json(raw)
         if update is None:
-            logger.warning("Webhook: de_json=None")
+            logger.warning("Webhook de_json=None")
             return "", 200
         logger.info("📨 update_id=%s", update.update_id)
-        bot.process_new_updates([update])
-        logger.info("✅ processed update_id=%s", update.update_id)
+        executor.submit(bot.process_new_updates, [update])  # ← ключевое изменение
     except Exception:
         logger.exception("❌ Webhook error")
     return "", 200
