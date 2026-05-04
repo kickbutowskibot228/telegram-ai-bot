@@ -807,9 +807,11 @@ def get_video_settings_keyboard(user_id: int):
 
 def get_payments_keyboard():
     kb = types.InlineKeyboardMarkup()
-    for k, p in PAY_PLANS.items():
+    for k, p in PAYPLANS.items():
         kb.add(types.InlineKeyboardButton(
-            f"{p['label']} — {p['amount']} ₽", callback_data=f"payplan:{k}"))
+            f"{p['label']} — {p['amount']} ₽",
+            callback_data=f"payplan_{k}"   # ← добавить подчёркивание
+        ))
     return kb
 
 
