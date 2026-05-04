@@ -1166,7 +1166,7 @@ def create_yookassa_payment(user_id, plan_key):
             "type": "redirect",
             "return_url": YOOKASSA_RETURN_URL
         },
-        "description": f"AI-токены: {plan['label']}",
+        "description": "Patriot AI — пополнение токенов",
         "metadata": {
             "user_id": str(user_id),
             "plan_key": plan_key,
