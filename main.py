@@ -807,7 +807,7 @@ def get_video_settings_keyboard(user_id: int):
 
 def get_payments_keyboard():
     kb = types.InlineKeyboardMarkup()
-    for k, p in PAYPLANS.items():
+    for k, p in PAY_PLANS.items():
         kb.add(types.InlineKeyboardButton(
             f"{p['label']} — {p['amount']} ₽",
             callback_data=f"payplan_{k}"   # ← добавить подчёркивание
@@ -2058,36 +2058,35 @@ def callback_payplan(call):
     plankey = raw_data[len("payplan_"):].strip()
 
     logger.info("payplan callback: raw=%r plankey=%r available=%s",
-                raw_data, plankey, list(PAYPLANS.keys()))
+                raw_data, plankey, list(PAY_PLANS.keys()))
 
-    if plankey not in PAYPLANS:
+    if plankey not in PAY_PLANS:
         bot.answer_callback_query(call.id, "Неверный тариф")
         return
 
     bot.answer_callback_query(call.id, "⏳ Создаём платёж...")
 
-    payment_id, confirmation_url = createyookassapayment(userid, plankey)
+    payment_id, confirmation_url = create_yookassa_payment(userid, plankey)
     if not payment_id or not confirmation_url:
-        safeeditmessage(
+        safe_edit_message(
             call.message.chat.id,
             call.message.message_id,
-            "❌ Ошибка создания платежа."
+            "❌ Не удалось создать платёж. Попробуйте позже."
         )
         return
 
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("💳 Оплатить", url=confirmation_url))
 
-    safeeditmessage(
+    safe_edit_message(
         call.message.chat.id,
         call.message.message_id,
-        f"{PAYPLANS[plankey]['label']} — {PAYPLANS[plankey]['amount']} ₽",
-        replymarkup=None
+        f"*{PAY_PLANS[plankey]['label']}* — {PAY_PLANS[plankey]['amount']} ₽\n\nНажми кнопку ниже для оплаты:"
     )
-    safesendmessage(
+    safe_send_message(
         call.message.chat.id,
-        "Нажми кнопку ниже, чтобы перейти к оплате:",
-        replymarkup=kb
+        "👇 Перейди по кнопке для оплаты:",
+        reply_markup=kb
     )
 
 
