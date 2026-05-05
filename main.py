@@ -3,7 +3,9 @@ import re
 import time
 import uuid
 import base64
-import sqlite3
+import psycopg2
+import psycopg2.extras
+import redis as redis_lib
 import logging
 import mimetypes
 import threading
@@ -58,7 +60,14 @@ if not OPENROUTER_API_KEY:
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown", threaded=False)
 app = Flask(__name__)
 
-DB_PATH = "bot.db"
+DATABASE_URL = os.getenv("DATABASE_URL")  # postgres://user:pass@host:5432/dbname
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
+if not DATABASE_URL:
+    raise RuntimeError("Не задан DATABASE_URL")
+
+# Redis клиент
+_redis = redis_lib.from_url(REDIS_URL, decode_responses=True)
 FREE_TOKENS = 100
 FREE_RESET_COOLDOWN_DAYS = 3
 TOKEN_EMOJI = "🍼"
@@ -243,39 +252,42 @@ OPENROUTER_HEADERS = {
 # ============================================================
 _db_local = threading.local()
 
-def _get_conn() -> sqlite3.Connection:
+def _get_conn() -> psycopg2.extensions.connection:
     conn = getattr(_db_local, "conn", None)
-    if conn is None:
-        conn = sqlite3.connect(
-            DB_PATH, timeout=30, isolation_level=None, check_same_thread=False,
-        )
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.execute("PRAGMA temp_store=MEMORY;")
-        conn.execute("PRAGMA cache_size=-20000;")
-        conn.execute("PRAGMA busy_timeout=30000;")
+    if conn is None or conn.closed:
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+        conn.autocommit = True
+        _db_local.conn = conn
+    # Проверяем что соединение живое
+    try:
+        conn.cursor().execute("SELECT 1")
+    except Exception:
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+        conn.autocommit = True
         _db_local.conn = conn
     return conn
-
 
 @contextmanager
 def db_tx():
     conn = _get_conn()
+    conn.autocommit = False
     try:
-        conn.execute("BEGIN IMMEDIATE;")
         yield conn
-        conn.execute("COMMIT;")
+        conn.commit()
     except Exception:
-        try: conn.execute("ROLLBACK;")
+        try: conn.rollback()
         except Exception: pass
         raise
+    finally:
+        conn.autocommit = True
 
 
 def init_db():
     conn = _get_conn()
-    conn.executescript("""
+    cur = conn.cursor()
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
+            user_id BIGINT PRIMARY KEY,
             model TEXT NOT NULL DEFAULT 'google/gemini-3-flash-preview',
             free_tokens INTEGER NOT NULL DEFAULT 40,
             paid_tokens INTEGER NOT NULL DEFAULT 0,
@@ -289,24 +301,30 @@ def init_db():
             video_duration INTEGER NOT NULL DEFAULT 5,
             video_aspect_ratio TEXT NOT NULL DEFAULT '16:9',
             last_free_reset_at TEXT DEFAULT NULL
-        );
+        )
+    """)
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS payments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             payment_id TEXT UNIQUE, idempotence_key TEXT UNIQUE,
-            user_id INTEGER NOT NULL, plan_key TEXT NOT NULL,
+            user_id BIGINT NOT NULL, plan_key TEXT NOT NULL,
             amount INTEGER NOT NULL, tokens_count INTEGER NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS chat_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL, role TEXT NOT NULL,
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL, role TEXT NOT NULL,
             content TEXT NOT NULL,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS generation_jobs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_uuid TEXT UNIQUE, user_id INTEGER NOT NULL,
+            id SERIAL PRIMARY KEY,
+            job_uuid TEXT UNIQUE, user_id BIGINT NOT NULL,
             provider TEXT NOT NULL, kind TEXT NOT NULL,
             model TEXT NOT NULL, flow TEXT NOT NULL DEFAULT '',
             prompt_text TEXT DEFAULT '', cost INTEGER NOT NULL DEFAULT 0,
@@ -314,32 +332,26 @@ def init_db():
             provider_generation_id TEXT DEFAULT '',
             polling_url TEXT DEFAULT '', file_path TEXT DEFAULT '',
             error_text TEXT DEFAULT '', charged INTEGER NOT NULL DEFAULT 0,
-            chat_id INTEGER DEFAULT 0, wait_msg_id INTEGER DEFAULT 0,
-            next_poll_at REAL DEFAULT 0, attempts INTEGER DEFAULT 0,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS user_locks (
-            user_id INTEGER PRIMARY KEY,
-            locked_at REAL NOT NULL,
-            reason TEXT DEFAULT ''
-        );
-        CREATE INDEX IF NOT EXISTS ix_chat_user   ON chat_history(user_id, id DESC);
-        CREATE INDEX IF NOT EXISTS ix_jobs_poll   ON generation_jobs(kind, status, next_poll_at);
-        CREATE INDEX IF NOT EXISTS ix_jobs_user   ON generation_jobs(user_id);
-        CREATE INDEX IF NOT EXISTS ix_payments_user ON payments(user_id);
-        CREATE INDEX IF NOT EXISTS ix_locks_age   ON user_locks(locked_at);
+            chat_id BIGINT DEFAULT 0, wait_msg_id BIGINT DEFAULT 0,
+            next_poll_at FLOAT DEFAULT 0, attempts INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
     """)
-    existing = {r[1] for r in conn.execute("PRAGMA table_info(generation_jobs)").fetchall()}
-    for col, ddl in [
-        ("chat_id",     "ALTER TABLE generation_jobs ADD COLUMN chat_id INTEGER DEFAULT 0"),
-        ("wait_msg_id", "ALTER TABLE generation_jobs ADD COLUMN wait_msg_id INTEGER DEFAULT 0"),
-        ("next_poll_at","ALTER TABLE generation_jobs ADD COLUMN next_poll_at REAL DEFAULT 0"),
-        ("attempts",    "ALTER TABLE generation_jobs ADD COLUMN attempts INTEGER DEFAULT 0"),
-    ]:
-        if col not in existing:
-            try: conn.execute(ddl)
-            except sqlite3.OperationalError: pass
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_locks (
+            user_id BIGINT PRIMARY KEY,
+            locked_at FLOAT NOT NULL,
+            reason TEXT DEFAULT ''
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_chat_user ON chat_history(user_id, id DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_jobs_poll ON generation_jobs(kind, status, next_poll_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_jobs_user ON generation_jobs(user_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_payments_user ON payments(user_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_locks_age ON user_locks(locked_at)")
+    conn.commit()
+    logger.info("✅ init_db done")
 
 
 # ============================================================
@@ -376,19 +388,23 @@ user_cache = UserCache(maxsize=5000, ttl=120)
 
 
 # ============================================================
-# RATE LIMIT
+# RATE LIMIT (Redis sliding window)
 # ============================================================
-_rate_lock = threading.Lock()
-_rate_data: dict = {}
-
 def rate_limit_ok(user_id: int, max_per_minute: int = 20) -> bool:
-    now = time.time()
-    with _rate_lock:
-        bucket = _rate_data.setdefault(user_id, [])
-        bucket[:] = [t for t in bucket if now - t < 60]
-        if len(bucket) >= max_per_minute: return False
-        bucket.append(now)
-    return True
+    try:
+        key = f"rl:{user_id}"
+        now = time.time()
+        pipe = _redis.pipeline()
+        pipe.zremrangebyscore(key, 0, now - 60)
+        pipe.zadd(key, {str(now): now})
+        pipe.zcard(key)
+        pipe.expire(key, 90)
+        results = pipe.execute()
+        count = results[2]
+        return count <= max_per_minute
+    except Exception as e:
+        logger.warning("rate_limit redis error: %s", e)
+        return True  # fail-open
 
 
 # ============================================================
@@ -448,16 +464,19 @@ def cleanup_stale_locks():
 # ============================================================
 def ensure_user(user_id: int):
     conn = _get_conn()
-    if conn.execute("SELECT 1 FROM users WHERE user_id=?", (user_id,)).fetchone():
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM users WHERE user_id=%s", (user_id,))
+    if cur.fetchone():
         return
     with db_tx() as c:
-        c.execute("""
-            INSERT OR IGNORE INTO users (
+        c.cursor().execute("""
+            INSERT INTO users (
                 user_id, model, free_tokens, paid_tokens,
                 image_mode, image_model, image_flow, pending_image_prompt,
                 video_mode, video_model, video_flow, video_duration,
                 video_aspect_ratio, last_free_reset_at
-            ) VALUES (?, ?, ?, 0, 0, ?, '', '', 0, ?, 'prompt_only', ?, ?, NULL)
+            ) VALUES (%s, %s, %s, 0, 0, %s, '', '', 0, %s, 'prompt_only', %s, %s, NULL)
+            ON CONFLICT (user_id) DO NOTHING
         """, (user_id, DEFAULT_MODEL, FREE_TOKENS, DEFAULT_IMAGE_MODEL,
               DEFAULT_VIDEO_MODEL, DEFAULT_VIDEO_DURATION, DEFAULT_VIDEO_ASPECT_RATIO))
 
@@ -467,26 +486,28 @@ def get_user_data(user_id: int) -> dict:
     if cached is not None:
         return cached
     ensure_user(user_id)
-    row = _get_conn().execute("""
+    cur = _get_conn().cursor()
+    cur.execute("""
         SELECT model, free_tokens, paid_tokens, image_mode, image_model,
                image_flow, pending_image_prompt, video_mode, video_model,
                video_flow, video_duration, video_aspect_ratio, last_free_reset_at
-        FROM users WHERE user_id=?
-    """, (user_id,)).fetchone()
+        FROM users WHERE user_id=%s
+    """, (user_id,))
+    row = cur.fetchone()
     data = {
-        "model":       row[0] if row[0] in TEXT_MODELS else DEFAULT_MODEL,
-        "free_tokens": row[1],
-        "paid_tokens": row[2],
-        "image_mode":  bool(row[3]),
-        "image_model": row[4] if row[4] in IMAGE_MODELS else DEFAULT_IMAGE_MODEL,
-        "image_flow":  row[5] or "",
-        "pending_image_prompt": row[6] or "",
-        "video_mode":  bool(row[7]),
-        "video_model": row[8] if row[8] in VIDEO_MODELS else DEFAULT_VIDEO_MODEL,
-        "video_flow":  row[9] if row[9] in ("prompt_only", "photo_plus_prompt") else "prompt_only",
-        "video_duration":     row[10] if row[10] in (5, 10) else DEFAULT_VIDEO_DURATION,
-        "video_aspect_ratio": row[11] if row[11] in ("16:9","9:16","1:1") else DEFAULT_VIDEO_ASPECT_RATIO,
-        "last_free_reset_at": row[12],
+        "model": row["model"] if row["model"] in TEXT_MODELS else DEFAULT_MODEL,
+        "free_tokens": row["free_tokens"],
+        "paid_tokens": row["paid_tokens"],
+        "image_mode": bool(row["image_mode"]),
+        "image_model": row["image_model"] if row["image_model"] in IMAGE_MODELS else DEFAULT_IMAGE_MODEL,
+        "image_flow": row["image_flow"] or "",
+        "pending_image_prompt": row["pending_image_prompt"] or "",
+        "video_mode": bool(row["video_mode"]),
+        "video_model": row["video_model"] if row["video_model"] in VIDEO_MODELS else DEFAULT_VIDEO_MODEL,
+        "video_flow": row["video_flow"] if row["video_flow"] in ("prompt_only", "photo_plus_prompt") else "prompt_only",
+        "video_duration": row["video_duration"] if row["video_duration"] in (5, 10) else DEFAULT_VIDEO_DURATION,
+        "video_aspect_ratio": row["video_aspect_ratio"] if row["video_aspect_ratio"] in ("16:9","9:16","1:1") else DEFAULT_VIDEO_ASPECT_RATIO,
+        "last_free_reset_at": row["last_free_reset_at"],
     }
     user_cache.set(user_id, data)
     return data
@@ -494,10 +515,10 @@ def get_user_data(user_id: int) -> dict:
 
 def _update_user(user_id: int, **fields):
     if not fields: return
-    cols = ", ".join(f"{k}=?" for k in fields)
+    cols = ", ".join(f"{k}=%s" for k in fields)
     values = list(fields.values()) + [user_id]
     with db_tx() as c:
-        c.execute(f"UPDATE users SET {cols} WHERE user_id=?", values)
+        c.cursor().execute(f"UPDATE users SET {cols} WHERE user_id=%s", values)
     user_cache.invalidate(user_id)
 
 
@@ -555,37 +576,28 @@ def format_timedelta_ru(delta):
 
 
 def reset_free_tokens(user_id: int):
-    """
-    Сбрасывает ТОЛЬКО бесплатные токены до FREE_TOKENS.
-    Платные токены НЕ ТРОГАЕТ.
-    """
-    with db_tx() as c:
-        # Сначала читаем текущий баланс для лога
-        row = c.execute(
-            "SELECT free_tokens, paid_tokens FROM users WHERE user_id=?",
-            (user_id,)
-        ).fetchone()
-        old_free = row[0] if row else 0
-        paid     = row[1] if row else 0
-
+    with db_tx() as conn:
+        c = conn.cursor()
+        c.execute("SELECT free_tokens, paid_tokens FROM users WHERE user_id=%s", (user_id,))
+        row = c.fetchone()
+        old_free = row["free_tokens"] if row else 0
+        paid = row["paid_tokens"] if row else 0
         c.execute("""
             UPDATE users
-            SET free_tokens = ?,
-                last_free_reset_at = ?
-            WHERE user_id = ?
+            SET free_tokens = %s,
+                last_free_reset_at = %s
+            WHERE user_id = %s
         """, (FREE_TOKENS, datetime.utcnow().isoformat(), user_id))
-
-        logger.info(
-            "reset_free_tokens: user=%s free %d→%d paid=%d (unchanged)",
-            user_id, old_free, FREE_TOKENS, paid
-        )
+    logger.info("reset_free_tokens: user=%s free %d→%d paid=%d (unchanged)",
+                user_id, old_free, FREE_TOKENS, paid)
     user_cache.invalidate(user_id)
 
 
 def add_paid_tokens(user_id, amount):
-    with db_tx() as c:
-        c.execute("UPDATE users SET paid_tokens = paid_tokens + ? WHERE user_id=?",
-                  (amount, user_id))
+    with db_tx() as conn:
+        conn.cursor().execute(
+            "UPDATE users SET paid_tokens = paid_tokens + %s WHERE user_id=%s",
+            (amount, user_id))
     user_cache.invalidate(user_id)
 
 
@@ -595,43 +607,45 @@ def refund_tokens(user_id, amount):
 
 
 def add_chat_message(user_id, role, content):
-    with db_tx() as c:
-        c.execute("INSERT INTO chat_history (user_id, role, content) VALUES (?, ?, ?)",
-                  (user_id, role, content))
+    with db_tx() as conn:
+        conn.cursor().execute(
+            "INSERT INTO chat_history (user_id, role, content) VALUES (%s, %s, %s)",
+            (user_id, role, content))
 
 
 def get_chat_history(user_id, limit=CHAT_HISTORY_LIMIT):
-    rows = _get_conn().execute("""
-        SELECT role, content FROM chat_history WHERE user_id=?
-        ORDER BY id DESC LIMIT ?
-    """, (user_id, limit)).fetchall()
-    rows = list(reversed(rows))
-    return [{"role": r[0], "content": r[1]}
-            for r in rows if r[0] in ("user", "assistant") and r[1]]
+    cur = _get_conn().cursor()
+    cur.execute("""
+        SELECT role, content FROM chat_history WHERE user_id=%s
+        ORDER BY id DESC LIMIT %s
+    """, (user_id, limit))
+    rows = list(reversed(cur.fetchall()))
+    return [{"role": r["role"], "content": r["content"]}
+            for r in rows if r["role"] in ("user", "assistant") and r["content"]]
 
 
 def clear_chat_history(user_id):
-    with db_tx() as c:
-        c.execute("DELETE FROM chat_history WHERE user_id=?", (user_id,))
+    with db_tx() as conn:
+        conn.cursor().execute("DELETE FROM chat_history WHERE user_id=%s", (user_id,))
 
 
 def consume_tokens(user_id: int, cost: int):
-    with db_tx() as c:
-        row = c.execute("SELECT free_tokens, paid_tokens FROM users WHERE user_id=?",
-                        (user_id,)).fetchone()
+    with db_tx() as conn:
+        c = conn.cursor()
+        c.execute("SELECT free_tokens, paid_tokens FROM users WHERE user_id=%s", (user_id,))
+        row = c.fetchone()
         if not row: return False, None, cost
-        free, paid = row
+        free, paid = row["free_tokens"], row["paid_tokens"]
         if free + paid < cost: return False, "limit", cost
         if paid >= cost:
-            c.execute("UPDATE users SET paid_tokens = paid_tokens - ? WHERE user_id=?", (cost, user_id))
+            c.execute("UPDATE users SET paid_tokens = paid_tokens - %s WHERE user_id=%s", (cost, user_id))
             src = "paid"
         elif paid > 0:
             rem = cost - paid
-            c.execute("UPDATE users SET paid_tokens=0, free_tokens=free_tokens-? WHERE user_id=?",
-                      (rem, user_id))
+            c.execute("UPDATE users SET paid_tokens=0, free_tokens=free_tokens-%s WHERE user_id=%s", (rem, user_id))
             src = "mixed"
         else:
-            c.execute("UPDATE users SET free_tokens = free_tokens - ? WHERE user_id=?", (cost, user_id))
+            c.execute("UPDATE users SET free_tokens = free_tokens - %s WHERE user_id=%s", (cost, user_id))
             src = "free"
     user_cache.invalidate(user_id)
     return True, src, cost
@@ -640,14 +654,14 @@ def consume_tokens(user_id: int, cost: int):
 def create_generation_job(user_id, provider, kind, model, flow, prompt_text, cost,
                           chat_id=0, wait_msg_id=0):
     job_uuid = uuid.uuid4().hex
-    with db_tx() as c:
-        c.execute("""INSERT INTO generation_jobs
+    with db_tx() as conn:
+        conn.cursor().execute("""
+            INSERT INTO generation_jobs
             (job_uuid, user_id, provider, kind, model, flow, prompt_text, cost,
              status, chat_id, wait_msg_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?,
- 'created', ?, ?)""",
-            (job_uuid, user_id, provider, kind, model, flow or '',
-             prompt_text or '', cost, chat_id, wait_msg_id))
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'created', %s, %s)
+        """, (job_uuid, user_id, provider, kind, model, flow or '',
+              prompt_text or '', cost, chat_id, wait_msg_id))
     return job_uuid
 
 
@@ -656,33 +670,37 @@ def update_generation_job(job_uuid, **fields):
                "error_text","charged","next_poll_at","attempts"}
     fields = {k: v for k, v in fields.items() if k in allowed}
     if not fields: return
-    cols = ", ".join(f"{k}=?" for k in fields) + ", updated_at=CURRENT_TIMESTAMP"
+    cols = ", ".join(f"{k}=%s" for k in fields) + ", updated_at=CURRENT_TIMESTAMP"
     values = list(fields.values()) + [job_uuid]
-    with db_tx() as c:
-        c.execute(f"UPDATE generation_jobs SET {cols} WHERE job_uuid=?", values)
+    with db_tx() as conn:
+        conn.cursor().execute(f"UPDATE generation_jobs SET {cols} WHERE job_uuid=%s", values)
 
 
 def create_payment_record(payment_id, idem_key, user_id, plan_key, amount, tokens_count):
-    with db_tx() as c:
-        c.execute("""INSERT INTO payments (payment_id, idempotence_key, user_id,
-                     plan_key, amount, tokens_count, status)
-                     VALUES (?, ?, ?, ?, ?, ?, 'pending')""",
-                  (payment_id, idem_key, user_id, plan_key, amount, tokens_count))
+    with db_tx() as conn:
+        conn.cursor().execute("""
+            INSERT INTO payments (payment_id, idempotence_key, user_id,
+                                  plan_key, amount, tokens_count, status)
+            VALUES (%s, %s, %s, %s, %s, %s, 'pending')
+        """, (payment_id, idem_key, user_id, plan_key, amount, tokens_count))
 
 
 def get_payment_by_id(pid):
-    row = _get_conn().execute("""
+    cur = _get_conn().cursor()
+    cur.execute("""
         SELECT payment_id, user_id, plan_key, amount, tokens_count, status
-        FROM payments WHERE payment_id=?
-    """, (pid,)).fetchone()
+        FROM payments WHERE payment_id=%s
+    """, (pid,))
+    row = cur.fetchone()
     if not row: return None
-    return {"payment_id": row[0], "user_id": row[1], "plan_key": row[2],
-            "amount": row[3], "tokens_count": row[4], "status": row[5]}
+    return {"payment_id": row["payment_id"], "user_id": row["user_id"],
+            "plan_key": row["plan_key"], "amount": row["amount"],
+            "tokens_count": row["tokens_count"], "status": row["status"]}
 
 
 def update_payment_status(pid, status):
-    with db_tx() as c:
-        c.execute("UPDATE payments SET status=? WHERE payment_id=?", (status, pid))
+    with db_tx() as conn:
+        conn.cursor().execute("UPDATE payments SET status=%s WHERE payment_id=%s", (status, pid))
 
 
 def is_admin(user_id): return user_id in ADMIN_IDS
@@ -1587,29 +1605,31 @@ def video_poller_loop():
     while True:
         try:
             now  = time.time()
-            rows = _get_conn().execute("""
-                SELECT job_uuid, user_id, chat_id, wait_msg_id, model, cost,
-                       polling_url, provider_generation_id, flow, attempts
-                FROM generation_jobs
-                WHERE kind='video'
-                  AND status IN ('submitted','polling','pending','in_progress')
-                  AND polling_url != ''
-                  AND next_poll_at <= ?
-                ORDER BY next_poll_at ASC LIMIT 50
-            """, (now,)).fetchall()
-            for r in rows:
-                with db_tx() as c:
-                    c.execute("UPDATE generation_jobs SET next_poll_at=? WHERE job_uuid=?",
-                              (now + VIDEO_POLL_INTERVAL, r[0]))
+                    cur = _get_conn().cursor()
+        cur.execute("""
+            SELECT job_uuid, user_id, chat_id, wait_msg_id, model, cost,
+                   polling_url, provider_generation_id, flow, attempts
+            FROM generation_jobs
+            WHERE kind='video'
+            AND status IN ('submitted','polling','pending','in_progress')
+            AND polling_url != ''
+            AND next_poll_at <= %s
+            ORDER BY next_poll_at ASC LIMIT 50
+        """, (now,))
+        rows = cur.fetchall()
+                        for r in rows:
+                with db_tx() as conn:
+                    conn.cursor().execute(
+                        "UPDATE generation_jobs SET next_poll_at=%s WHERE job_uuid=%s",
+                        (now + VIDEO_POLL_INTERVAL, r["job_uuid"]))
                 submit_task(_poll_video_job, {
-                    "job_uuid": r[0], "user_id": r[1], "chat_id": r[2],
-                    "wait_msg_id": r[3], "model": r[4], "cost": r[5],
-                    "polling_url": r[6], "provider_generation_id": r[7],
-                    "flow": r[8], "attempts": r[9],
+                    "job_uuid": r["job_uuid"], "user_id": r["user_id"],
+                    "chat_id": r["chat_id"], "wait_msg_id": r["wait_msg_id"],
+                    "model": r["model"], "cost": r["cost"],
+                    "polling_url": r["polling_url"],
+                    "provider_generation_id": r["provider_generation_id"],
+                    "flow": r["flow"], "attempts": r["attempts"],
                 })
-        except Exception as e:
-            logger.exception("poller loop: %s", e)
-        time.sleep(5)
 
 
 # ============================================================
