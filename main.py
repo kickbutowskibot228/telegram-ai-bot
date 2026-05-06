@@ -223,6 +223,19 @@ PAY_PLANS = {
 VIDEO_POLL_INTERVAL    = 15
 VIDEO_POLL_MAX_ATTEMPTS = 60
 
+# ─── Отмена генерации ─────────────────────────────────────────
+def is_job_cancelled(job_uuid: str) -> bool:
+    try:
+        return redis.exists(f"cancel:{job_uuid}") > 0
+    except Exception:
+        return False
+
+def mark_job_cancelled(job_uuid: str):
+    try:
+        redis.set(f"cancel:{job_uuid}", "1", ex=3600)
+    except Exception:
+        pass
+# ──────────────────────────────────────────────────────────────
 
 # ============================================================
 # HTTP CLIENT
@@ -1319,11 +1332,15 @@ def process_nano_request(message):
                 f"Стоимость: *{cost}* {TOKEN_EMOJI}\n{balance_line(user_id)}",
                 reply_markup=get_main_keyboard()); return
 
-        job  = create_generation_job(user_id, "openrouter", "image", model, flow,
+                job  = create_generation_job(user_id, "openrouter", "image", model, flow,
                                      prompt_text, cost, chat_id=message.chat.id)
+        cancel_kb = types.InlineKeyboardMarkup()
+        cancel_kb.add(types.InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_job:{job}"))
         wait = safe_send_message(message.chat.id,
-            f"🖼 {'Обрабатываю' if is_photo else 'Генерирую'}... ⏳\n"
-            f"Модель: *{model_name}*")
+            f"🖼 *{'Обрабатываю' if is_photo else 'Генерирую'} изображение...*\n"
+            f"⏳ Модель: *{model_name}* · обычно 15–30 сек",
+            parse_mode='Markdown',
+            reply_markup=cancel_kb)
 
         input_img = None
         if is_photo:
@@ -1335,7 +1352,15 @@ def process_nano_request(message):
                                   "❌ Не удалось скачать фото.")
                 return
 
-        res = generate_image_openrouter(model, prompt_text, input_img)
+                res = generate_image_openrouter(model, prompt_text, input_img)
+        if is_job_cancelled(job):
+            update_generation_job(job, status="cancelled")
+            try:
+                bot.edit_message_text("❌ *Генерация отменена*",
+                    chat_id=message.chat.id, message_id=wait.message_id,
+                    parse_mode='Markdown')
+            except Exception: pass
+            return
         if not res["ok"]:
             update_generation_job(job, status="failed", error_text=res["error"])
             safe_edit_message(message.chat.id, wait.message_id, res["error"])
@@ -1419,13 +1444,20 @@ def submit_video_job(message):
                 f"Стоимость: *{cost}* {TOKEN_EMOJI}\n{balance_line(user_id)}",
                 reply_markup=get_main_keyboard()); return
 
-        wait = safe_send_message(message.chat.id,
-            f"🎬 Ставлю в очередь...\n"
+                wait = safe_send_message(message.chat.id,
+            f"🎬 *Генерирую видео...*\n"
             f"Модель: *{model_name}*  ⏱ *{dur}с*  📐 *{ar}*\n"
-            f"Обычно 1–5 минут.")
+            f"⏳ Обычно 1–5 минут, не закрывай бот",
+            parse_mode='Markdown')
         job = create_generation_job(user_id, "openrouter", "video", model, flow,
                                     prompt, cost, chat_id=message.chat.id,
                                     wait_msg_id=wait.message_id)
+        cancel_kb = types.InlineKeyboardMarkup()
+        cancel_kb.add(types.InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_job:{job}"))
+        try:
+            bot.edit_message_reply_markup(message.chat.id, wait.message_id, reply_markup=cancel_kb)
+        except Exception:
+            pass
 
         input_img = None
         if is_photo:
