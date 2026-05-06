@@ -464,7 +464,8 @@ def cleanup_stale_locks():
     cutoff = time.time() - USER_LOCK_TTL
     try:
         with db_tx() as c:
-            cur = c.execute("DELETE FROM user_locks WHERE locked_at < ?", (cutoff,))
+            cur = c.cursor()
+            cur.execute("DELETE FROM user_locks WHERE locked_at < %s", (cutoff,))
             removed = getattr(cur, 'rowcount', 0) or 0
             if removed > 0:
                 logger.info("🧹 Stale locks removed: %d", removed)
@@ -1026,6 +1027,11 @@ def submit_openrouter_video_generation(model, prompt, duration=5, aspect_ratio="
       "none" / отсутствует — модель не поддерживает image-to-video
     """
     url     = "https://openrouter.ai/api/v1/videos"
+    # MiniMax поддерживает только 6 и 10 секунд
+    if "minimax" in model.lower() or "hailuo" in model.lower():
+        if duration not in (6, 10):
+            duration = 6
+
     payload = {
         "model":        model,
         "prompt":       prompt,
@@ -1332,8 +1338,8 @@ def process_nano_request(message):
                 f"Стоимость: *{cost}* {TOKEN_EMOJI}\n{balance_line(user_id)}",
                 reply_markup=get_main_keyboard()); return
 
-                job  = create_generation_job(user_id, "openrouter", "image", model, flow,
-                                     prompt_text, cost, chat_id=message.chat.id)
+        job  = create_generation_job(user_id, "openrouter", "image", model, flow,
+                                    prompt_text, cost, chat_id=message.chat.id)
         cancel_kb = types.InlineKeyboardMarkup()
         cancel_kb.add(types.InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_job:{job}"))
         wait = safe_send_message(message.chat.id,
@@ -1637,19 +1643,19 @@ def video_poller_loop():
     while True:
         try:
             now  = time.time()
-                    cur = _get_conn().cursor()
-        cur.execute("""
-            SELECT job_uuid, user_id, chat_id, wait_msg_id, model, cost,
-                   polling_url, provider_generation_id, flow, attempts
-            FROM generation_jobs
-            WHERE kind='video'
-            AND status IN ('submitted','polling','pending','in_progress')
-            AND polling_url != ''
-            AND next_poll_at <= %s
-            ORDER BY next_poll_at ASC LIMIT 50
-        """, (now,))
-        rows = cur.fetchall()
-                        for r in rows:
+            cur = _get_conn().cursor()
+            cur.execute("""
+                SELECT job_uuid, user_id, chat_id, wait_msg_id, model, cost,
+                       polling_url, provider_generation_id, flow, attempts
+                FROM generation_jobs
+                WHERE kind='video'
+                AND status IN ('submitted','polling','pending','in_progress')
+                AND polling_url != ''
+                AND next_poll_at <= %s
+                ORDER BY next_poll_at ASC LIMIT 50
+            """, (now,))
+            rows = cur.fetchall()
+            for r in rows:
                 with db_tx() as conn:
                     conn.cursor().execute(
                         "UPDATE generation_jobs SET next_poll_at=%s WHERE job_uuid=%s",
@@ -1662,6 +1668,9 @@ def video_poller_loop():
                     "provider_generation_id": r["provider_generation_id"],
                     "flow": r["flow"], "attempts": r["attempts"],
                 })
+        except Exception as e:
+            logger.exception("❌ video_poller_loop error: %s", e)
+        time.sleep(VIDEO_POLL_INTERVAL)
 
 
 # ============================================================
