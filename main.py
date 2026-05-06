@@ -173,7 +173,7 @@ VIDEO_MODELS_CONFIG = {
     "minimax/hailuo-2.3": {
         "name": "MiniMax Hailuo",
         "emoji": "🆙",
-        "costs": {5: 50, 10: 100},
+        "costs": {6: 50, 10: 100},
         "description": "Быстрая альтернатива",
         "max_duration": 10,
         # MiniMax принимает image_url на верхнем уровне
