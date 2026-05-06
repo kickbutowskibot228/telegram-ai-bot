@@ -1444,7 +1444,7 @@ def submit_video_job(message):
                 f"Стоимость: *{cost}* {TOKEN_EMOJI}\n{balance_line(user_id)}",
                 reply_markup=get_main_keyboard()); return
 
-                wait = safe_send_message(message.chat.id,
+        wait = safe_send_message(message.chat.id,
             f"🎬 *Генерирую видео...*\n"
             f"Модель: *{model_name}*  ⏱ *{dur}с*  📐 *{ar}*\n"
             f"⏳ Обычно 1–5 минут, не закрывай бот",
