@@ -223,18 +223,6 @@ PAY_PLANS = {
 VIDEO_POLL_INTERVAL    = 15
 VIDEO_POLL_MAX_ATTEMPTS = 60
 
-# ─── Отмена генерации ─────────────────────────────────────────
-def is_job_cancelled(job_uuid: str) -> bool:
-    try:
-        return redis.exists(f"cancel:{job_uuid}") > 0
-    except Exception:
-        return False
-
-def mark_job_cancelled(job_uuid: str):
-    try:
-        redis.set(f"cancel:{job_uuid}", "1", ex=3600)
-    except Exception:
-        pass
 # ──────────────────────────────────────────────────────────────
 
 # ============================================================
@@ -258,7 +246,6 @@ OPENROUTER_HEADERS = {
     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
     "Content-Type": "application/json",
 }
-
 
 # ============================================================
 # DB: WAL + connection per thread + индексы
@@ -293,7 +280,6 @@ def db_tx():
         raise
     finally:
         conn.autocommit = True
-
 
 def init_db():
     conn = _get_conn()
@@ -366,7 +352,6 @@ def init_db():
     conn.commit()
     logger.info("✅ init_db done")
 
-
 # ============================================================
 # LRU КЭШ ПОЛЬЗОВАТЕЛЕЙ
 # ============================================================
@@ -399,7 +384,6 @@ class UserCache:
 
 user_cache = UserCache(maxsize=5000, ttl=120)
 
-
 # ============================================================
 # RATE LIMIT (Redis sliding window)
 # ============================================================
@@ -418,7 +402,6 @@ def rate_limit_ok(user_id: int, max_per_minute: int = 20) -> bool:
     except Exception as e:
         logger.warning("rate_limit redis error: %s", e)
         return True  # fail-open
-
 
 # ============================================================
 # USER LOCKS (через БД — переживают рестарты)
@@ -449,7 +432,6 @@ def try_acquire_user(user_id: int, reason: str = "") -> bool:
             logger.exception("try_acquire_user: %s", e)
             return True  # fail-open
 
-
 def release_user(user_id: int):
     with _user_busy_lock:
         try:
@@ -458,7 +440,6 @@ def release_user(user_id: int):
             logger.info("🔓 Lock released user=%s", user_id)
         except Exception as e:
             logger.warning("release_user: %s", e)
-
 
 def cleanup_stale_locks():
     cutoff = time.time() - USER_LOCK_TTL
@@ -471,7 +452,6 @@ def cleanup_stale_locks():
                 logger.info("🧹 Stale locks removed: %d", removed)
     except Exception as e:
         logger.warning("cleanup_stale_locks: %s", e)
-
 
 # ============================================================
 # ОПЕРАЦИИ С БД
@@ -493,7 +473,6 @@ def ensure_user(user_id: int):
             ON CONFLICT (user_id) DO NOTHING
         """, (user_id, DEFAULT_MODEL, FREE_TOKENS, DEFAULT_IMAGE_MODEL,
               DEFAULT_VIDEO_MODEL, DEFAULT_VIDEO_DURATION, DEFAULT_VIDEO_ASPECT_RATIO))
-
 
 def get_user_data(user_id: int) -> dict:
     cached = user_cache.get(user_id)
@@ -526,7 +505,6 @@ def get_user_data(user_id: int) -> dict:
     user_cache.set(user_id, data)
     return data
 
-
 def _update_user(user_id: int, **fields):
     if not fields: return
     cols = ", ".join(f"{k}=%s" for k in fields)
@@ -534,7 +512,6 @@ def _update_user(user_id: int, **fields):
     with db_tx() as c:
         c.cursor().execute(f"UPDATE users SET {cols} WHERE user_id=%s", values)
     user_cache.invalidate(user_id)
-
 
 def set_user_model(uid, v):    _update_user(uid, model=v)
 def set_image_mode(uid, v):    _update_user(uid, image_mode=1 if v else 0)
@@ -566,7 +543,6 @@ def get_total_tokens(user_id):
 def balance_line(user_id):
     return f"💰 Твой баланс: *{get_total_tokens(user_id)}* {TOKEN_EMOJI}"
 
-
 def can_reset_free_tokens(user_id):
     d = get_user_data(user_id)
     if not d["last_free_reset_at"]: return True, None
@@ -578,7 +554,6 @@ def can_reset_free_tokens(user_id):
     now = datetime.utcnow()
     return (True, None) if now >= nxt else (False, nxt - now)
 
-
 def format_timedelta_ru(delta):
     s = max(0, int(delta.total_seconds()))
     d, h, m = s // 86400, (s % 86400) // 3600, (s % 3600) // 60
@@ -587,7 +562,6 @@ def format_timedelta_ru(delta):
     if h: parts.append(f"{h} ч.")
     if m or not parts: parts.append(f"{m} мин.")
     return " ".join(parts)
-
 
 def reset_free_tokens(user_id: int):
     with db_tx() as conn:
@@ -606,7 +580,6 @@ def reset_free_tokens(user_id: int):
                 user_id, old_free, FREE_TOKENS, paid)
     user_cache.invalidate(user_id)
 
-
 def add_paid_tokens(user_id, amount):
     with db_tx() as conn:
         conn.cursor().execute(
@@ -614,18 +587,15 @@ def add_paid_tokens(user_id, amount):
             (amount, user_id))
     user_cache.invalidate(user_id)
 
-
 def refund_tokens(user_id, amount):
     if amount > 0:
         add_paid_tokens(user_id, amount)
-
 
 def add_chat_message(user_id, role, content):
     with db_tx() as conn:
         conn.cursor().execute(
             "INSERT INTO chat_history (user_id, role, content) VALUES (%s, %s, %s)",
             (user_id, role, content))
-
 
 def get_chat_history(user_id, limit=CHAT_HISTORY_LIMIT):
     cur = _get_conn().cursor()
@@ -637,11 +607,9 @@ def get_chat_history(user_id, limit=CHAT_HISTORY_LIMIT):
     return [{"role": r["role"], "content": r["content"]}
             for r in rows if r["role"] in ("user", "assistant") and r["content"]]
 
-
 def clear_chat_history(user_id):
     with db_tx() as conn:
         conn.cursor().execute("DELETE FROM chat_history WHERE user_id=%s", (user_id,))
-
 
 def consume_tokens(user_id: int, cost: int):
     with db_tx() as conn:
@@ -664,7 +632,6 @@ def consume_tokens(user_id: int, cost: int):
     user_cache.invalidate(user_id)
     return True, src, cost
 
-
 def create_generation_job(user_id, provider, kind, model, flow, prompt_text, cost,
                           chat_id=0, wait_msg_id=0):
     job_uuid = uuid.uuid4().hex
@@ -678,7 +645,6 @@ def create_generation_job(user_id, provider, kind, model, flow, prompt_text, cos
               prompt_text or '', cost, chat_id, wait_msg_id))
     return job_uuid
 
-
 def update_generation_job(job_uuid, **fields):
     allowed = {"status","provider_generation_id","polling_url","file_path",
                "error_text","charged","next_poll_at","attempts"}
@@ -689,7 +655,6 @@ def update_generation_job(job_uuid, **fields):
     with db_tx() as conn:
         conn.cursor().execute(f"UPDATE generation_jobs SET {cols} WHERE job_uuid=%s", values)
 
-
 def create_payment_record(payment_id, idem_key, user_id, plan_key, amount, tokens_count):
     with db_tx() as conn:
         conn.cursor().execute("""
@@ -697,7 +662,6 @@ def create_payment_record(payment_id, idem_key, user_id, plan_key, amount, token
                                   plan_key, amount, tokens_count, status)
             VALUES (%s, %s, %s, %s, %s, %s, 'pending')
         """, (payment_id, idem_key, user_id, plan_key, amount, tokens_count))
-
 
 def get_payment_by_id(pid):
     cur = _get_conn().cursor()
@@ -711,11 +675,9 @@ def get_payment_by_id(pid):
             "plan_key": row["plan_key"], "amount": row["amount"],
             "tokens_count": row["tokens_count"], "status": row["status"]}
 
-
 def update_payment_status(pid, status):
     with db_tx() as conn:
         conn.cursor().execute("UPDATE payments SET status=%s WHERE payment_id=%s", (status, pid))
-
 
 def is_admin(user_id): return user_id in ADMIN_IDS
 
@@ -723,7 +685,6 @@ def require_admin(message):
     if is_admin(message.from_user.id): return True
     safe_send_message(message.chat.id, "⛔ У тебя нет доступа к админ-командам.")
     return False
-
 
 def get_user_balance_info(user_id):
     ensure_user(user_id)
@@ -737,7 +698,6 @@ def get_user_balance_info(user_id):
             "image_mode": bool(row[4]), "image_model": row[5],
             "last_free_reset_at": row[6]}
 
-
 def get_users_list(limit=20):
     rows = _get_conn().execute("""
         SELECT user_id, model, free_tokens, paid_tokens FROM users
@@ -746,13 +706,11 @@ def get_users_list(limit=20):
     return [{"user_id": r[0], "model": r[1], "free_tokens": r[2],
              "paid_tokens": r[3], "total_tokens": r[2]+r[3]} for r in rows]
 
-
 def admin_add_tokens(user_id, amount):
     with db_tx() as c:
         c.execute("UPDATE users SET paid_tokens = paid_tokens + ? WHERE user_id=?",
                   (amount, user_id))
     user_cache.invalidate(user_id)
-
 
 # ============================================================
 # KEYBOARDS
@@ -767,7 +725,6 @@ def get_main_keyboard():
 
 def get_current_keyboard(user_id): return get_main_keyboard()
 
-
 def get_text_models_keyboard():
     """Inline-клавиатура выбора текстовой модели."""
     kb = types.InlineKeyboardMarkup()
@@ -777,7 +734,6 @@ def get_text_models_keyboard():
             callback_data=f"model:{model_id}"
         ))
     return kb
-
 
 def get_image_models_keyboard(current_model_id: str = ""):
     """
@@ -793,7 +749,6 @@ def get_image_models_keyboard(current_model_id: str = ""):
         ))
     return kb
 
-
 def get_video_models_keyboard(current_model_id: str = ""):
     """
     Inline-клавиатура выбора модели видео.
@@ -808,7 +763,6 @@ def get_video_models_keyboard(current_model_id: str = ""):
             callback_data=f"videomodel:{model_id}"
         ))
     return kb
-
 
 def get_video_settings_keyboard(user_id: int):
     """Настройки длительности и соотношения сторон для выбранной видео-модели."""
@@ -836,7 +790,6 @@ def get_video_settings_keyboard(user_id: int):
     ))
     return kb
 
-
 def get_payments_keyboard():
     kb = types.InlineKeyboardMarkup()
     for k, p in PAY_PLANS.items():
@@ -846,10 +799,8 @@ def get_payments_keyboard():
         ))
     return kb
 
-
 def format_balance_text(user_id):
     return balance_line(user_id)
-
 
 # ============================================================
 # TELEGRAM SAFE SEND
@@ -857,7 +808,6 @@ def format_balance_text(user_id):
 def _extract_retry_after(e):
     m = re.search(r"retry after (\d+)", str(e), re.IGNORECASE)
     return int(m.group(1)) if m else None
-
 
 def _tg_call(func, *args, max_attempts=3, base_delay=1.5, **kwargs):
     last = None
@@ -872,7 +822,6 @@ def _tg_call(func, *args, max_attempts=3, base_delay=1.5, **kwargs):
             if i < max_attempts - 1:
                 time.sleep(sleep_for)
     raise last
-
 
 def safe_send_message(chat_id, text, **kw):
     return _tg_call(bot.send_message, chat_id, text, **kw)
@@ -903,7 +852,6 @@ def safe_send_video(chat_id, file_path, caption=None, parse_mode=None,
                         parse_mode=parse_mode,
                         supports_streaming=supports_streaming, timeout=120)
 
-
 def safe_edit_message(chat_id, message_id, text, reply_markup=None):
     try:
         mk = reply_markup if isinstance(reply_markup, types.InlineKeyboardMarkup) else None
@@ -915,7 +863,6 @@ def safe_edit_message(chat_id, message_id, text, reply_markup=None):
             bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=reply_markup)
         except Exception: pass
 
-
 def get_image_cost(model, flow):
     if flow == "prompt_only":      return PROMPT_ONLY_COSTS.get(model, 1)
     if flow == "photo_plus_prompt": return PHOTO_PROMPT_COSTS.get(model, 1)
@@ -924,11 +871,9 @@ def get_image_cost(model, flow):
 def get_video_cost(model, duration):
     return VIDEO_PROMPT_COSTS.get(model, {}).get(duration, 40)
 
-
 def extract_data_url_parts(data_url):
     m = re.match(r"^data:(image\/[\w.+-]+);base64,(.+)$", data_url, re.DOTALL)
     return (m.group(1), m.group(2)) if m else (None, None)
-
 
 def save_generated_image_from_data_url(data_url, prefix="nano"):
     mime, b64 = extract_data_url_parts(data_url)
@@ -941,18 +886,15 @@ def save_generated_image_from_data_url(data_url, prefix="nano"):
         f.write(base64.b64decode(b64))
     return fp
 
-
 def telegram_photo_to_data_url(message):
     photo = message.photo[-1]
     fi   = bot.get_file(photo.file_id)
     data = bot.download_file(fi.file_path)
     return f"data:image/jpeg;base64,{base64.b64encode(data).decode()}"
 
-
 def send_generated_image_both(chat_id, file_path, caption_preview, caption_file):
     safe_send_photo(chat_id, file_path, caption=caption_preview)
     safe_send_document(chat_id, file_path, caption=caption_file)
-
 
 # ============================================================
 # OPENROUTER API
@@ -978,7 +920,6 @@ def call_openrouter_text(model, user_message, history=None, max_retries=2):
     if model != DEFAULT_MODEL:
         return call_openrouter_text(DEFAULT_MODEL, user_message, history, 1) + " ⚡"
     return "⚠️ Не удалось получить ответ от AI. Попробуй позже."
-
 
 def generate_image_openrouter(model, prompt_text, input_image_data_url=None, max_retries=2):
     url   = "https://openrouter.ai/api/v1/chat/completions"
@@ -1010,7 +951,6 @@ def generate_image_openrouter(model, prompt_text, input_image_data_url=None, max
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
     return {"ok": False, "error": "⚠️ Модель не вернула изображение. Попробуй другой промт."}
-
 
 def submit_openrouter_video_generation(model, prompt, duration=5, aspect_ratio="16:9",
                                        input_image_data_url=None):
@@ -1121,7 +1061,6 @@ def submit_openrouter_video_generation(model, prompt, duration=5, aspect_ratio="
         logger.exception("submit video err: %s", e)
         return {"ok": False, "error": "Ошибка при запуске генерации видео."}
 
-
 def poll_openrouter_video(polling_url):
     try:
         r = HTTP.get(polling_url,
@@ -1136,7 +1075,6 @@ def poll_openrouter_video(polling_url):
     except Exception as e:
         logger.exception("poll err: %s", e)
         return {"ok": False, "error": "poll error"}
-
 
 def download_openrouter_video_content(gen_id, index=0, prefix="video"):
     fn  = f"{prefix}_{int(time.time())}_{uuid.uuid4().hex[:8]}.mp4"
@@ -1185,7 +1123,6 @@ def download_openrouter_video_content(gen_id, index=0, prefix="video"):
     logger.error("❌ All download attempts failed gen_id=%s", gen_id)
     return None
 
-
 # ============================================================
 # YOOKASSA
 # ============================================================
@@ -1232,7 +1169,6 @@ def create_yookassa_payment(user_id, plan_key):
         logger.exception("YK err: %s", e)
         return None, None
 
-
 def apply_payment_if_needed(payment_id):
     p = get_payment_by_id(payment_id)
     if not p: return False
@@ -1251,7 +1187,6 @@ def apply_payment_if_needed(payment_id):
         logger.warning("notify pay: %s", e)
     return True
 
-
 # ============================================================
 # WORKERS POOL
 # ============================================================
@@ -1262,7 +1197,6 @@ def submit_task(fn, *args, **kwargs):
         try: fn(*args, **kwargs)
         except Exception as e: logger.exception("task err: %s", e)
     executor.submit(_wrap)
-
 
 # ============================================================
 # BUSINESS LOGIC
@@ -1303,7 +1237,6 @@ def process_text_question(message):
         f"🤖 *{TEXT_MODELS.get(model, model)}*\n\n{answer}\n\n"
         f"💸 Списано: *{charged}* {TOKEN_EMOJI}\n{balance_line(user_id)}")
 
-
 def process_nano_request(message):
     user_id = message.from_user.id
     if not try_acquire_user(user_id, reason="image_generation"):
@@ -1340,13 +1273,11 @@ def process_nano_request(message):
 
         job  = create_generation_job(user_id, "openrouter", "image", model, flow,
                                     prompt_text, cost, chat_id=message.chat.id)
-        cancel_kb = types.InlineKeyboardMarkup()
-        cancel_kb.add(types.InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_job:{job}"))
         wait = safe_send_message(message.chat.id,
             f"🖼 *{'Обрабатываю' if is_photo else 'Генерирую'} изображение...*\n"
             f"⏳ Модель: *{model_name}* · обычно 15–30 сек",
             parse_mode='Markdown',
-            reply_markup=cancel_kb)
+              reply_markup=get_main_keyboard())
 
         input_img = None
         if is_photo:
@@ -1358,15 +1289,7 @@ def process_nano_request(message):
                                   "❌ Не удалось скачать фото.")
                 return
 
-                res = generate_image_openrouter(model, prompt_text, input_img)
-        if is_job_cancelled(job):
-            update_generation_job(job, status="cancelled")
-            try:
-                bot.edit_message_text("❌ *Генерация отменена*",
-                    chat_id=message.chat.id, message_id=wait.message_id,
-                    parse_mode='Markdown')
-            except Exception: pass
-            return
+        res = generate_image_openrouter(model, prompt_text, input_img)
         if not res["ok"]:
             update_generation_job(job, status="failed", error_text=res["error"])
             safe_edit_message(message.chat.id, wait.message_id, res["error"])
@@ -1403,7 +1326,6 @@ def process_nano_request(message):
             f"✅ Готово.\n💸 Списано: *{charged}* {TOKEN_EMOJI}\n{balance_line(user_id)}")
     finally:
         release_user(user_id)
-
 
 def submit_video_job(message):
     user_id = message.from_user.id
@@ -1458,12 +1380,6 @@ def submit_video_job(message):
         job = create_generation_job(user_id, "openrouter", "video", model, flow,
                                     prompt, cost, chat_id=message.chat.id,
                                     wait_msg_id=wait.message_id)
-        cancel_kb = types.InlineKeyboardMarkup()
-        cancel_kb.add(types.InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_job:{job}"))
-        try:
-            bot.edit_message_reply_markup(message.chat.id, wait.message_id, reply_markup=cancel_kb)
-        except Exception:
-            pass
 
         input_img = None
         if is_photo:
@@ -1471,9 +1387,8 @@ def submit_video_job(message):
                 input_img = telegram_photo_to_data_url(message)
             except Exception as e:
                 update_generation_job(job, status="failed", error_text=str(e))
-                safe_edit_message(message.chat.id, wait.message_id, "❌ Ошибка фото.")
+                safe_edit_message(message.chat.id, wait.message_id, "❌ Не удалось скачать фото.")
                 return
-
         res = submit_openrouter_video_generation(model, prompt, dur, ar, input_img)
         if not res["ok"]:
             update_generation_job(job, status="failed", error_text=res["error"])
@@ -1493,7 +1408,6 @@ def submit_video_job(message):
     finally:
         if acquired:
             release_user(user_id)
-
 
 # ============================================================
 # VIDEO BACKGROUND POLLER
@@ -1589,12 +1503,12 @@ def _finalize_video_job(job_row):
     finally:
         release_user(user_id)
 
-
 def _poll_video_job(job_row):
     job_uuid = job_row["job_uuid"]
     user_id  = job_row["user_id"]
     attempts = job_row["attempts"] or 0
     try:
+
         if attempts >= VIDEO_POLL_MAX_ATTEMPTS:
             update_generation_job(job_uuid, status="timeout", error_text="poll_timeout")
             try:
@@ -1637,7 +1551,6 @@ def _poll_video_job(job_row):
         try: release_user(user_id)
         except Exception: pass
 
-
 def video_poller_loop():
     logger.info("video_poller started")
     while True:
@@ -1672,7 +1585,6 @@ def video_poller_loop():
             logger.exception("❌ video_poller_loop error: %s", e)
         time.sleep(VIDEO_POLL_INTERVAL)
 
-
 # ============================================================
 # HANDLERS — команды
 # ============================================================
@@ -1691,7 +1603,6 @@ def cmd_start(message):
         f"*{BTN_PHOTO}* — генерация и редактирование изображений\n"
         f"*{BTN_VIDEO}* — генерация видео",
         reply_markup=get_main_keyboard())
-
 
 @bot.message_handler(commands=["restart"])
 def cmd_restart(message):
@@ -1728,18 +1639,15 @@ def cmd_restart(message):
         "\n".join(lines),
         reply_markup=get_main_keyboard())
 
-
 @bot.message_handler(commands=["newchat"])
 def cmd_newchat(message):
     clear_chat_history(message.from_user.id)
     safe_send_message(message.chat.id, "🧹 История очищена.",
                       reply_markup=get_main_keyboard())
 
-
 @bot.message_handler(commands=["myid"])
 def cmd_myid(message):
     safe_send_message(message.chat.id, f"Твой ID: `{message.from_user.id}`")
-
 
 @bot.message_handler(commands=["models"])
 def cmd_models(message):
@@ -1765,7 +1673,6 @@ def cmd_models(message):
         lines.append(f"{mark}{cfg['emoji']} *{cfg['name']}* — {costs}\n"
                      f"   `{mid}`")
     safe_send_message(message.chat.id, "\n".join(lines))
-
 
 @bot.message_handler(commands=["admin"])
 def cmd_admin(message):
@@ -1793,7 +1700,6 @@ def cmd_admin(message):
         parse_mode="Markdown"
     )
 
-
 @bot.message_handler(commands=["user"])
 def cmd_user_info(message):
     if not require_admin(message): return
@@ -1810,7 +1716,6 @@ def cmd_user_info(message):
         f"💳 Paid: *{info['paid_tokens']}* {TOKEN_EMOJI}\n"
         f"💰 Итого: *{info['total_tokens']}* {TOKEN_EMOJI}")
 
-
 @bot.message_handler(commands=["users"])
 def cmd_users(message):
     if not require_admin(message): return
@@ -1822,7 +1727,6 @@ def cmd_users(message):
         lines.append(f"`{u['user_id']}` — *{u['total_tokens']}* {TOKEN_EMOJI} "
                      f"— {TEXT_MODELS.get(u['model'], u['model'])}")
     safe_send_message(message.chat.id, "\n".join(lines))
-
 
 @bot.message_handler(commands=["addtokens"])
 def cmd_addtokens(message):
@@ -1842,7 +1746,6 @@ def cmd_addtokens(message):
             reply_markup=get_main_keyboard())
     except Exception as e:
         logger.warning("notify %s: %s", uid, e)
-
 
 @bot.message_handler(commands=["locks"])
 def cmd_locks(message):
@@ -1864,7 +1767,6 @@ def cmd_locks(message):
     except Exception as e:
         safe_send_message(message.chat.id, f"Ошибка: {e}")
 
-
 @bot.message_handler(commands=["unlock"])
 def cmd_unlock(message):
     if not require_admin(message): return
@@ -1884,7 +1786,6 @@ def cmd_unlock(message):
         return
     safe_send_message(message.chat.id,
         "`/unlock` — все\n`/unlock USER_ID` — конкретный")
-
 
 @bot.message_handler(commands=["removetokens"])
 def admin_remove_tokens(message):
@@ -1993,7 +1894,6 @@ def admin_stats(message):
         f"🟢 Активны сегодня: {active_today}\n"
         f"💰 Токенов в системе: {total_balance:,}")
 
-
 # ============================================================
 # HANDLERS — кнопки главного меню
 # ============================================================
@@ -2043,13 +1943,11 @@ def btn_restart(message):
         "\n".join(lines),
         reply_markup=kb)
 
-
 @bot.message_handler(func=lambda m: m.text == BTN_BALANCE)
 def btn_balance(message):
     safe_send_message(message.chat.id,
         format_balance_text(message.from_user.id),
         reply_markup=get_main_keyboard())
-
 
 @bot.message_handler(func=lambda m: m.text == BTN_AI)
 def btn_text_models(message):
@@ -2064,7 +1962,6 @@ def btn_text_models(message):
         f"{balance_line(uid)}\n\n"
         f"Выбери модель и задай вопрос:",
         reply_markup=get_text_models_keyboard())
-
 
 @bot.message_handler(func=lambda m: m.text == BTN_PHOTO)
 def btn_photo_models(message):
@@ -2086,7 +1983,6 @@ def btn_photo_models(message):
         f"📸 Фото *с подписью* — редактирование",
         reply_markup=get_image_models_keyboard(current_model_id=d["image_model"]))
 
-
 @bot.message_handler(func=lambda m: m.text == BTN_VIDEO)
 def btn_video_models(message):
     """
@@ -2104,7 +2000,6 @@ def btn_video_models(message):
         f"{balance_line(uid)}",
         reply_markup=get_video_models_keyboard(current_model_id=d["video_model"]))
 
-
 @bot.message_handler(func=lambda m: m.text == BTN_TOPUP, content_types=['text'])
 def btn_payments(message):
     safe_send_message(
@@ -2112,7 +2007,6 @@ def btn_payments(message):
         f"{balance_line(message.from_user.id)}\n\nВыберите пакет токенов:",
         reply_markup=get_payments_keyboard()
     )
-
 
 @bot.message_handler(func=lambda m: m.text == BTN_SUPPORT)
 def btn_support(message):
@@ -2123,7 +2017,6 @@ def btn_support(message):
         '🛟 <b>Поддержка</b>\n'
         '<a href="https://t.me/ai_patriot_support">@ai_patriot_support</a>',
         parse_mode="HTML", disable_web_page_preview=True, reply_markup=kb)
-
 
 # ============================================================
 # CALLBACKS
@@ -2143,7 +2036,6 @@ def callback_text_model(call):
         f"Стоимость: *{cfg['cost']}* {TOKEN_EMOJI} за запрос\n"
         f"{balance_line(call.from_user.id)}\n\n"
         f"История очищена. Задай вопрос — бот ответит.")
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("imgmodel:"))
 def callback_image_model(call):
@@ -2166,7 +2058,6 @@ def callback_image_model(call):
         f"📸 Отправь фото *с подписью* — отредактирую.",
         reply_markup=get_image_models_keyboard(current_model_id=mid))
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("videomodel:"))
 def callback_video_model(call):
     """Пользователь выбрал модель видео — показываем настройки."""
@@ -2188,7 +2079,6 @@ def callback_video_model(call):
         f"Выбери длительность и формат, затем нажми *Начать*:",
         reply_markup=get_video_settings_keyboard(uid))
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("videoduration:"))
 def callback_video_duration(call):
     try: dur = int(call.data.split(":", 1)[1])
@@ -2201,7 +2091,6 @@ def callback_video_duration(call):
             reply_markup=get_video_settings_keyboard(call.from_user.id))
     except Exception: pass
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("videoaspect:"))
 def callback_video_aspect(call):
     ar = call.data.split(":", 1)[1]
@@ -2213,7 +2102,6 @@ def callback_video_aspect(call):
         bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id,
             reply_markup=get_video_settings_keyboard(call.from_user.id))
     except Exception: pass
-
 
 @bot.callback_query_handler(func=lambda c: c.data == "videostart:go")
 def callback_video_start(call):
@@ -2232,7 +2120,6 @@ def callback_video_start(call):
         f"✍️ Текст — text-to-video\n"
         f"📸 Фото *с подписью* — image-to-video",
         reply_markup=get_video_settings_keyboard(uid))
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("payplan_"))
 def callback_payplan(call):
@@ -2271,7 +2158,6 @@ def callback_payplan(call):
         "👇 Перейди по кнопке для оплаты:",
         reply_markup=kb
     )
-
 
 @bot.callback_query_handler(func=lambda c: c.data == "confirm_reset_free")
 def callback_confirm_reset(call):
@@ -2312,7 +2198,6 @@ def callback_confirm_reset(call):
         "Выбери действие:",
         reply_markup=get_main_keyboard())
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "cancel_reset")
 def callback_cancel_reset(call):
     bot.answer_callback_query(call.id, "Отменено")
@@ -2321,7 +2206,6 @@ def callback_cancel_reset(call):
     safe_send_message(call.message.chat.id,
         "Выбери действие:",
         reply_markup=get_main_keyboard())
-
 
 # ============================================================
 # ROUTING — входящие сообщения
@@ -2332,7 +2216,6 @@ def _check_rate(uid, chat_id) -> bool:
         except Exception: pass
         return False
     return True
-
 
 @bot.message_handler(content_types=["photo"])
 def handle_photo(message):
@@ -2347,7 +2230,6 @@ def handle_photo(message):
     safe_send_message(message.chat.id,
         f"Сначала выбери режим:\n{BTN_PHOTO} — изображения\n{BTN_VIDEO} — видео",
         reply_markup=get_main_keyboard())
-
 
 @bot.message_handler(
     func=lambda m: bool(m.text) and not m.text.startswith("/") and m.text not in MENU_BUTTONS,
@@ -2365,7 +2247,6 @@ def handle_text(message):
     if d["image_mode"]:
         submit_task(process_nano_request, message); return
     submit_task(process_text_question, message)
-
 
 # ============================================================
 # FLASK WEBHOOK
@@ -2387,7 +2268,6 @@ def webhook():
         logger.exception("❌ Webhook error")
     return "", 200
 
-
 @app.route("/yookassa/webhook", methods=["POST"])
 def yookassa_webhook():
     try:
@@ -2401,11 +2281,9 @@ def yookassa_webhook():
         logger.exception("yk webhook: %s", e)
         return "", 200
 
-
 @app.route("/healthz", methods=["GET"])
 def health():
     return {"ok": True, "ts": int(time.time())}, 200
-
 
 @app.route("/", methods=["GET"])
 def index():
@@ -2420,7 +2298,6 @@ def setup_webhook():
             logger.info("Webhook: %s", url)
         except Exception as e:
             logger.exception("webhook set: %s", e)
-
 
 # ============================================================
 # BACKGROUND WORKERS
@@ -2447,11 +2324,9 @@ def cleanup_old_files_loop():
             logger.exception("cleanup loop: %s", e)
         time.sleep(30 * 60)
 
-
 def start_background_workers():
     threading.Thread(target=video_poller_loop,    name="video-poller",  daemon=True).start()
     threading.Thread(target=cleanup_old_files_loop, name="file-cleaner", daemon=True).start()
-
 
 # ============================================================
 # STARTUP
@@ -2459,14 +2334,12 @@ def start_background_workers():
 _initialized = False
 _init_lock   = threading.Lock()
 
-
 def log_registered_handlers():
     try:
         logger.info("📋 Handlers: %d message, %d callback",
                     len(bot.message_handlers), len(bot.callback_query_handlers))
     except Exception as e:
         logger.warning("log_registered_handlers: %s", e)
-
 
 def _initialize_once():
     global _initialized
@@ -2487,9 +2360,5 @@ def _initialize_once():
             logger.exception("❌ Init failed: %s", e)
             raise
 
-
 _initialize_once()
 
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT, threaded=True)
