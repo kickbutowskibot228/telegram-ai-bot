@@ -1604,14 +1604,20 @@ def video_poller_loop():
 # HANDLERS — команды
 # ============================================================
 @bot.message_handler(commands=['start'])
-def start(message):
-    # Отправить стикер
-    bot.send_sticker(
-        message.chat.id,
-        "CAACAgIAAxkBAAERLuxp_ymm98P5ZkP8bud3cm0-8uhknQACSkcAAvhKMEuLaO8FcZ70_jsE"  
-    )
-    
-    # Затем приветственный текст
+def cmdstart(message):
+    logger.info('start user=%s', message.from_user.id)
+    uid = message.from_user.id
+    ensure_user(uid)
+    clear_chat_history(uid)
+    clear_image_state(uid)
+    clear_video_state(uid)
+
+    # Стикер (вставь file_id после получения)
+    try:
+        bot.send_sticker(message.chat.id, "CAACAgIAAxkBAAERLuxp_ymm98P5ZkP8bud3cm0-8uhknQACSkcAAvhKMEuLaO8FcZ70_jsE")
+    except Exception:
+        pass
+
     welcome_text = (
         f"👋 Привет, {message.from_user.first_name}!\n\n"
         "🤖 <b>Patriot AI</b> — твой ИИ-ассистент\n\n"
@@ -1619,17 +1625,17 @@ def start(message):
         "• Текстовые запросы к ИИ\n"
         "• Генерация изображений\n\n"
         "⚡️ <b>Возможности:</b>\n"
-        "• 💬 GPT-4o, Claude, Gemini, DeepSeek, Qwen\n"
+        "• 💬 GPT-5.5, Claude, Gemini, DeepSeek, Kimi\n"
         "• 🎨 Генерация и редактирование изображений\n"
-        "• 🎬 Генерация видео\n"
+        "• 🎬 Генерация видео (Kling, MiniMax, Seedance)\n"
         "• 💳 Пополнение через карту\n\n"
         "👇 Выбери что хочешь сделать:"
     )
-    bot.send_message(
+    safe_send_message(
         message.chat.id,
         welcome_text,
         parse_mode="HTML",
-        reply_markup=markup  # твоя клавиатура
+        reply_markup=get_main_keyboard()
     )
 
 @bot.message_handler(commands=["restart"])
