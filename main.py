@@ -1993,9 +1993,7 @@ def btn_photo_models(message):
         f"🖼 *Выбери модель изображений:*\n\n"
         f"Текущая: *{IMAGE_MODELS.get(d['image_model'], d['image_model'])}*\n"
         f"{balance_line(uid)}\n\n"
-        f"После выбора модели отправь:\n"
-        f"✍️ Текст — генерация изображения\n"
-        f"📸 Фото *с подписью* — редактирование",
+        f"Загрузите до четырех изображений или/и отправьте текстовой запрос, чтобы начать✍️📸",
         reply_markup=get_image_models_keyboard(current_model_id=d["image_model"]))
 
 @bot.message_handler(func=lambda m: m.text == BTN_VIDEO)
