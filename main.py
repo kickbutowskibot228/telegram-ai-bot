@@ -243,23 +243,36 @@ VIDEO_POLL_MAX_ATTEMPTS = 60
 # ============================================================
 # HTTP CLIENT
 # ============================================================
-def _build_http_session() -> requests.Session:
+def build_http_session() -> requests.Session:
     s = requests.Session()
     retry = Retry(
-        total=3, backoff_factor=1.0,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset(["GET", "POST"]),
+        total=2,                    # ✅ было 3 — убираем лишний retry
+        backoff_factor=0.5,         # ✅ было 1.0 — быстрее переповтор
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=frozenset(['GET', 'POST']),
+        raise_on_status=False
     )
-    adapter = HTTPAdapter(pool_connections=50, pool_maxsize=100, max_retries=retry)
+    adapter = HTTPAdapter(
+        pool_connections=50,
+        pool_maxsize=100,
+        max_retries=retry,
+        pool_block=False            # ✅ не блокировать если пул занят
+    )
     s.mount("https://", adapter)
     s.mount("http://", adapter)
-    s.headers.update({"Connection": "keep-alive"})
+    s.headers.update({
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=30, max=100"  # ✅ держать соединение живым
+    })
     return s
 
 HTTP = _build_http_session()
 OPENROUTER_HEADERS = {
     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
     "Content-Type": "application/json",
+    "HTTP-Referer": f"https://{RENDER_EXTERNAL_HOSTNAME}",  
+    "X-Title": "Patriot AI Bot",                             
+    "X-Preference": "speed",                                  
 }
 
 # ============================================================
@@ -916,28 +929,43 @@ def send_generated_image_both(chat_id, file_path, caption_preview, caption_file)
 # ============================================================
 def call_openrouter_text(model, user_message, history=None, max_retries=2):
     url = "https://openrouter.ai/api/v1/chat/completions"
-    messages = [{"role": "system", "content": "Отвечай кратко, по делу, на русском языке."}]
-    if history: messages.extend(history)
+    messages = [{"role": "system", "content": "Ты умный ИИ-ассистент. Отвечай чётко и по делу."}]
+    if history:
+        messages.extend(history)
     messages.append({"role": "user", "content": user_message})
-    data = {"model": model, "messages": messages, "max_tokens": 500, "temperature": 0.7}
+
+    data = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": 1500,         # ✅ было 500 — слишком мало, ответ резался
+        "temperature": 0.7,
+        "stream": False,
+        "route": "fallback",        # ✅ OpenRouter fallback на другой провайдер если основной медленный
+    }
+
     for attempt in range(max_retries):
         try:
-            r = HTTP.post(url, headers=OPENROUTER_HEADERS, json=data, timeout=45)
+            r = HTTP.post(
+                url,
+                headers=OPENROUTER_HEADERS,
+                json=data,
+                timeout=45          # ✅ было 90 — не ждём мёртвую модель
+            )
             if r.status_code == 200:
                 return r.json()["choices"][0]["message"]["content"]
             if r.status_code == 429:
-                time.sleep(2 ** attempt); continue
+                time.sleep(1.5 * (attempt + 1))  # ✅ было 2 — чуть быстрее
+                continue
             logger.error("OR text %s %s", r.status_code, r.text[:300])
-        except requests.exceptions.Timeout:  # ✅ FIX 3: обработка таймаута
-            logger.warning("OR text timeout model=%s attempt=%d", model, attempt)
+        except requests.exceptions.Timeout:
+            logger.warning("OR timeout model=%s attempt=%d", model, attempt)
             if attempt >= max_retries - 1:
-                return "⏱ Модель не ответила за отведённое время. Попробуй ещё раз или выбери другую модель."
-            time.sleep(2)
-            continue
+                return "⏱ Модель не ответила. Попробуй ещё раз или выбери другую."
+            continue                 # ✅ не sleep при timeout — сразу retry
         except Exception as e:
             logger.exception("OR text err %s", e)
             if attempt < max_retries - 1:
-                time.sleep(2 * (attempt + 1))
+                time.sleep(1)
 
     if model != DEFAULT_MODEL:
         return call_openrouter_text(DEFAULT_MODEL, user_message, history, 1)
