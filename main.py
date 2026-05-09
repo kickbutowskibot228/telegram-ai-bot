@@ -128,7 +128,7 @@ TEXT_MODELS_CONFIG = {
         "emoji": "🐳",
         "description": "Идеально для генерации кода",
     },
-    "moonshotai/kimi-k2.6": {
+    "moonshotai/kimi-latest": {
         "name": "Kimi 2.6",
         "cost": 3,
         "emoji": "🌝",
@@ -397,7 +397,7 @@ class UserCache:
         with self._lock:
             self._data.pop(key, None)
 
-user_cache = UserCache(maxsize=5000, ttl=120)
+user_cache = UserCache(maxsize=5000, ttl=15)
 
 # ============================================================
 # RATE LIMIT (Redis sliding window)
@@ -922,19 +922,26 @@ def call_openrouter_text(model, user_message, history=None, max_retries=2):
     data = {"model": model, "messages": messages, "max_tokens": 500, "temperature": 0.7}
     for attempt in range(max_retries):
         try:
-            r = HTTP.post(url, headers=OPENROUTER_HEADERS, json=data, timeout=90)
+            r = HTTP.post(url, headers=OPENROUTER_HEADERS, json=data, timeout=45)
             if r.status_code == 200:
                 return r.json()["choices"][0]["message"]["content"]
             if r.status_code == 429:
                 time.sleep(2 ** attempt); continue
-            logger.error("OR text %s: %s", r.status_code, r.text[:300])
+            logger.error("OR text %s %s", r.status_code, r.text[:300])
+        except requests.exceptions.Timeout:  # ✅ FIX 3: обработка таймаута
+            logger.warning("OR text timeout model=%s attempt=%d", model, attempt)
+            if attempt >= max_retries - 1:
+                return "⏱ Модель не ответила за отведённое время. Попробуй ещё раз или выбери другую модель."
+            time.sleep(2)
+            continue
         except Exception as e:
-            logger.exception("OR text err: %s", e)
+            logger.exception("OR text err %s", e)
             if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
+                time.sleep(2 * (attempt + 1))
+
     if model != DEFAULT_MODEL:
-        return call_openrouter_text(DEFAULT_MODEL, user_message, history, 1) + " ⚡"
-    return "⚠️ Не удалось получить ответ от AI. Попробуй позже."
+        return call_openrouter_text(DEFAULT_MODEL, user_message, history, 1)
+    return "⚠️ AI недоступен. Попробуй позже."
 
 def generate_image_openrouter(model, prompt_text, input_image_data_url=None, max_retries=2):
     url   = "https://openrouter.ai/api/v1/chat/completions"
@@ -1221,8 +1228,10 @@ def process_text_question(message):
     user_text = (message.text or "").strip()
     if not user_text:
         safe_send_message(message.chat.id, "Напиши текстовый вопрос.",
-                          reply_markup=get_main_keyboard()); return
+                          reply_markup=get_main_keyboard())
+        return
 
+    # Читаем данные для проверки баланса
     d     = get_user_data(user_id)
     model = d["model"] if d["model"] in TEXT_MODELS else DEFAULT_MODEL
     cost  = TEXT_MODEL_COSTS.get(model, 1)
@@ -1231,14 +1240,24 @@ def process_text_question(message):
         safe_send_message(message.chat.id,
             f"❌ Недостаточно токенов для *{TEXT_MODELS.get(model, model)}*.\n\n"
             f"Стоимость: *{cost}* {TOKEN_EMOJI}\n{balance_line(user_id)}",
-            reply_markup=get_main_keyboard()); return
+            reply_markup=get_main_keyboard())
+        return
 
     wait = safe_send_message(message.chat.id, "🤖 Думаю... ⏳")
-    try: bot.send_chat_action(message.chat.id, "typing")
-    except Exception: pass
+    try:
+        bot.send_chat_action(message.chat.id, "typing")
+    except Exception:
+        pass
 
     history = get_chat_history(user_id)
-    answer  = call_openrouter_text(model, user_text, history=history)
+
+    # ✅ FIX 1: читаем модель СВЕЖО прямо перед запросом
+    # (пользователь мог переключить модель пока мы готовились)
+    fresh = get_user_data(user_id)
+    model = fresh["model"] if fresh["model"] in TEXT_MODELS else DEFAULT_MODEL
+    cost  = TEXT_MODEL_COSTS.get(model, 1)
+
+    answer = call_openrouter_text(model, user_text, history=history)
 
     ok, _, charged = consume_tokens(user_id, cost)
     if not ok:
