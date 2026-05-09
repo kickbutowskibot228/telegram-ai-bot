@@ -125,7 +125,7 @@ TEXT_MODELS_CONFIG = {
     "deepseek/deepseek-v3.2": {
         "name": "DeepSeek",
         "cost": 5,
-        "emoji": "👑",
+        "emoji": "🐳",
         "description": "Идеально для генерации кода",
     },
     "moonshotai/kimi-k2.6": {
@@ -137,7 +137,7 @@ TEXT_MODELS_CONFIG = {
     "qwen/qwen3-235b-a22b-2507": {
         "name": "Qwen3",
         "cost": 3,
-        "emoji": "🌝",
+        "emoji": "👸",
         "description": "Умная и дешёвая",
     },
     # ═══ Добавить текстовую модель — скопируй блок выше ═══
@@ -187,7 +187,7 @@ VIDEO_MODELS_CONFIG = {
     },
     "bytedance/seedance-2.0-fast": {
         "name": "Seedance 2.0",
-        "emoji": "🎥",
+        "emoji": "📽",
         "costs": {5: 30, 10: 60},
         "description": "От ByteDance",
         "max_duration": 10,
