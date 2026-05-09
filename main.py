@@ -68,7 +68,7 @@ if not DATABASE_URL:
 
 # Redis клиент
 _redis = redis_lib.from_url(REDIS_URL, decode_responses=True)
-FREE_TOKENS = 100
+FREE_TOKENS = 30
 FREE_RESET_COOLDOWN_DAYS = 3
 TOKEN_EMOJI = "🍼"
 GENERATED_DIR = "generated_images"
@@ -106,33 +106,39 @@ SUPPORT_URL = f"https://t.me/{SUPPORT_USERNAME}"
 TEXT_MODELS_CONFIG = {
     "google/gemini-3-flash-preview": {
         "name": "Gemini 3 Flash",
-        "cost": 1,
+        "cost": 3,
         "emoji": "⚡",
         "description": "Быстрая и дешёвая",
     },
-    "openai/gpt-5.5": {
-        "name": "GPT-5.5",
-        "cost": 1,
+    "openai/gpt-5.4": {
+        "name": "GPT-5.4",
+        "cost": 25,
         "emoji": "🤖",
         "description": "Мощная модель OpenAI",
     },
-    "anthropic/claude-sonnet-4.6": {
-        "name": "Claude Sonnet 4.6",
-        "cost": 2,
+    "anthropic/claude-haiku-4.5": {
+        "name": "Claude",
+        "cost": 5,
         "emoji": "🎭",
         "description": "Умная и точная",
     },
-    "anthropic/claude-opus-4.6": {
-        "name": "Claude Opus 4.6",
-        "cost": 7,
+    "deepseek/deepseek-v3.2": {
+        "name": "DeepSeek",
+        "cost": 5,
         "emoji": "👑",
-        "description": "Лучшая от Anthropic",
+        "description": "Идеально для генерации кода",
     },
     "moonshotai/kimi-k2.6": {
         "name": "Kimi 2.6",
-        "cost": 1,
+        "cost": 3,
         "emoji": "🌝",
-        "description": "Moonshot AI",
+        "description": "Набирающая популярность модель",
+    },
+    "qwen/qwen3-235b-a22b-2507": {
+        "name": "Qwen3",
+        "cost": 3,
+        "emoji": "🌝",
+        "description": "Умная и дешёвая",
     },
     # ═══ Добавить текстовую модель — скопируй блок выше ═══
 }
@@ -151,8 +157,8 @@ IMAGE_MODELS_CONFIG = {
     "openai/gpt-5.4-image-2": {
         "name": "GPT Image-2",
         "emoji": "🖼",
-        "cost_text": 15,
-        "cost_photo": 20,
+        "cost_text": 25,
+        "cost_photo": 35,
         "description": "Новейшая модель для генерации изображений от OpenAI",
     },
     # ═══ Добавить модель изображений — скопируй блок выше ═══
@@ -164,7 +170,7 @@ VIDEO_MODELS_CONFIG = {
     "kwaivgi/kling-v3.0-pro": {
         "name": "Kling V3 Pro",
         "emoji": "🎬",
-        "costs": {5: 100, 10: 200},
+        "costs": {5: 120, 10: 220},
         "description": "Качественная генерация видео",
         "max_duration": 10,
         # Формат передачи первого кадра в OpenRouter API
@@ -173,20 +179,29 @@ VIDEO_MODELS_CONFIG = {
     "minimax/hailuo-2.3": {
         "name": "MiniMax Hailuo",
         "emoji": "🆙",
-        "costs": {6: 50, 10: 100},
+        "costs": {6: 90, 10: 180},
         "description": "Быстрая альтернатива",
         "max_duration": 10,
         # MiniMax принимает image_url на верхнем уровне
         "image_input_format": "image_url",
     },
-    "bytedance/seedance-2.0": {
+    "bytedance/seedance-2.0-fast": {
         "name": "Seedance 2.0",
         "emoji": "🎥",
-        "costs": {5: 105, 10: 205},
+        "costs": {5: 30, 10: 60},
         "description": "От ByteDance",
         "max_duration": 10,
         # Seedance принимает first_frame_image отдельным полем
         "image_input_format": "first_frame_image",
+    },
+    "alibaba/wan-2.6": {
+        "name": "Wan 2.6",
+        "emoji": "🎥",
+        "costs": {5: 40, 10: 80},
+        "description": "Свежая модель",
+        "max_duration": 10,
+        # Формат передачи первого кадра в OpenRouter API
+        "image_input_format": "frame_images",
     },
     # ═══ Добавить видео модель — скопируй блок выше ═══
 }
@@ -214,10 +229,10 @@ VIDEO_PROMPT_COSTS = {k: v["costs"] for k, v in VIDEO_MODELS_CONFIG.items()}
 DEFAULT_MODEL = DEFAULT_TEXT_MODEL
 
 PAY_PLANS = {
-    "mini":  {"label": f"100 {TOKEN_EMOJI}",  "amount": 10, "tokens": 100},
-    "basic": {"label": f"300 {TOKEN_EMOJI}", "amount": 550, "tokens": 300},
-    "plus":  {"label": f"1000 {TOKEN_EMOJI}", "amount": 1850, "tokens": 1000},
-    "pro":   {"label": f"3000 {TOKEN_EMOJI}", "amount": 5500, "tokens": 3000},
+    "mini":  {"label": f"100 {TOKEN_EMOJI}",  "amount": 199, "tokens": 100},
+    "basic": {"label": f"300 {TOKEN_EMOJI}", "amount": 549, "tokens": 300},
+    "plus":  {"label": f"1000 {TOKEN_EMOJI}", "amount": 1790, "tokens": 1000},
+    "pro":   {"label": f"3000 {TOKEN_EMOJI}", "amount": 4990, "tokens": 3000},
 }
 
 VIDEO_POLL_INTERVAL    = 15
