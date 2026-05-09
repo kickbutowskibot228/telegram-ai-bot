@@ -1621,9 +1621,6 @@ def cmdstart(message):
     welcome_text = (
         f"👋 Привет, {message.from_user.first_name}!\n\n"
         "🤖 <b>Patriot AI</b> — твой ИИ-ассистент\n\n"
-        "🎁 <b>Бесплатно каждый день:</b>\n"
-        "• Текстовые запросы к ИИ\n"
-        "• Генерация изображений\n\n"
         "⚡️ <b>Возможности:</b>\n"
         "• 💬 GPT-5.5, Claude, Gemini, DeepSeek, Kimi\n"
         "• 🎨 Генерация и редактирование изображений\n"
