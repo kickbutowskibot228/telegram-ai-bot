@@ -1603,21 +1603,34 @@ def video_poller_loop():
 # ============================================================
 # HANDLERS — команды
 # ============================================================
-@bot.message_handler(commands=["start"])
-def cmd_start(message):
-    logger.info("🚀 /start user=%s", message.from_user.id)
-    uid = message.from_user.id
-    ensure_user(uid)          # создаёт пользователя если нет
-    clear_chat_history(uid)   # очищает историю чата
-    clear_image_state(uid)    # сбрасывает режим изображений
-    clear_video_state(uid)    # сбрасывает режим видео
-    # НЕТ reset_free_tokens здесь!
-    safe_send_message(message.chat.id,
-        "Я Patriot AI 🦸🏼‍♂️\n\n"
-        f"*{BTN_AI}* — текстовые модели\n"
-        f"*{BTN_PHOTO}* — генерация и редактирование изображений\n"
-        f"*{BTN_VIDEO}* — генерация видео",
-        reply_markup=get_main_keyboard())
+@bot.message_handler(commands=['start'])
+def start(message):
+    # Отправить стикер
+    bot.send_sticker(
+        message.chat.id,
+        "CAACAgIAAxkBAAERLuxp_ymm98P5ZkP8bud3cm0-8uhknQACSkcAAvhKMEuLaO8FcZ70_jsE"  
+    )
+    
+    # Затем приветственный текст
+    welcome_text = (
+        f"👋 Привет, {message.from_user.first_name}!\n\n"
+        "🤖 <b>Patriot AI</b> — твой ИИ-ассистент\n\n"
+        "🎁 <b>Бесплатно каждый день:</b>\n"
+        "• Текстовые запросы к ИИ\n"
+        "• Генерация изображений\n\n"
+        "⚡️ <b>Возможности:</b>\n"
+        "• 💬 GPT-4o, Claude, Gemini, DeepSeek, Qwen\n"
+        "• 🎨 Генерация и редактирование изображений\n"
+        "• 🎬 Генерация видео\n"
+        "• 💳 Пополнение через карту\n\n"
+        "👇 Выбери что хочешь сделать:"
+    )
+    bot.send_message(
+        message.chat.id,
+        welcome_text,
+        parse_mode="HTML",
+        reply_markup=markup  # твоя клавиатура
+    )
 
 @bot.message_handler(commands=["restart"])
 def cmd_restart(message):
