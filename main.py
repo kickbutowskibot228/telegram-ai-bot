@@ -710,6 +710,7 @@ def update_payment_status(pid, status):
 def is_admin(user_id): return user_id in ADMIN_IDS
 
 def require_admin(message):
+    logger.info("ADMIN CHECK: uid=%s ADMIN_IDS=%s", message.from_user.id, ADMIN_IDS)
     if is_admin(message.from_user.id): return True
     safe_send_message(message.chat.id, "⛔ У тебя нет доступа к админ-командам.")
     return False
