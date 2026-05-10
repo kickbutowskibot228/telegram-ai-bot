@@ -1806,14 +1806,19 @@ def cmd_user_info(message):
 @bot.message_handler(commands=["users"])
 def cmd_users(message):
     if not require_admin(message): return
-    users = get_users_list(20)
-    if not users:
-        safe_send_message(message.chat.id, "Пользователей нет."); return
-    lines = ["🧾 *Последние пользователи:*\n"]
-    for u in users:
-        lines.append(f"`{u['user_id']}` — *{u['total_tokens']}* {TOKEN_EMOJI} "
-                     f"— {TEXT_MODELS.get(u['model'], u['model'])}")
-    safe_send_message(message.chat.id, "\n".join(lines))
+    try:
+        users = get_users_list(20)
+        if not users:
+            safe_send_message(message.chat.id, "Пользователей нет."); return
+        lines = ["🧾 *Последние пользователи:*\n"]
+        for u in users:
+            lines.append(f"`{u['user_id']}` — *{u['total_tokens']}* {TOKEN_EMOJI} "
+                         f"— {TEXT_MODELS.get(u['model'], u['model'])}")
+        safe_send_message(message.chat.id, "\n".join(lines))
+    except Exception as e:
+        import traceback
+        logger.error("cmd_users ERROR: %s\n%s", e, traceback.format_exc())
+        safe_send_message(message.chat.id, f"❌ Ошибка: {e}")
 
 @bot.message_handler(commands=["addtokens"])
 def cmd_addtokens(message):
