@@ -716,28 +716,36 @@ def require_admin(message):
 
 def get_user_balance_info(user_id):
     ensure_user(user_id)
-    row = _get_conn().execute("""
-        SELECT user_id, model, free_tokens, paid_tokens, image_mode,
-               image_model, last_free_reset_at FROM users WHERE user_id=?
-    """, (user_id,)).fetchone()
+    cur = get_conn().cursor()
+    cur.execute("""
+        SELECT userid, model, freetokens, paidtokens, imagemode,
+               imagemodel, lastfreeresetat FROM users WHERE userid=%s
+    """, (user_id,))
+    row = cur.fetchone()
     if not row: return None
-    return {"user_id": row[0], "model": row[1], "free_tokens": row[2],
-            "paid_tokens": row[3], "total_tokens": row[2]+row[3],
-            "image_mode": bool(row[4]), "image_model": row[5],
-            "last_free_reset_at": row[6]}
+    return {"user_id": row['userid'], "model": row['model'],
+            "free_tokens": row['freetokens'], "paid_tokens": row['paidtokens'],
+            "total_tokens": row['freetokens'] + row['paidtokens'],
+            "image_mode": bool(row['imagemode']), "image_model": row['imagemodel'],
+            "last_free_reset_at": row['lastfreeresetat']}
 
 def get_users_list(limit=20):
-    rows = _get_conn().execute("""
-        SELECT user_id, model, free_tokens, paid_tokens FROM users
-        ORDER BY user_id DESC LIMIT ?
-    """, (limit,)).fetchall()
-    return [{"user_id": r[0], "model": r[1], "free_tokens": r[2],
-             "paid_tokens": r[3], "total_tokens": r[2]+r[3]} for r in rows]
+    cur = get_conn().cursor()
+    cur.execute("""
+        SELECT userid, model, freetokens, paidtokens FROM users
+        ORDER BY userid DESC LIMIT %s
+    """, (limit,))
+    rows = cur.fetchall()
+    return [{"user_id": r['userid'], "model": r['model'],
+             "free_tokens": r['freetokens'], "paid_tokens": r['paidtokens'],
+             "total_tokens": r['freetokens'] + r['paidtokens']} for r in rows]
 
 def admin_add_tokens(user_id, amount):
-    with db_tx() as c:
-        c.execute("UPDATE users SET paid_tokens = paid_tokens + ? WHERE user_id=?",
-                  (amount, user_id))
+    with dbtx() as conn:
+        conn.cursor().execute(
+            "UPDATE users SET paidtokens=paidtokens+%s WHERE userid=%s",
+            (amount, user_id)
+        )
     user_cache.invalidate(user_id)
 
 # ============================================================
@@ -1829,18 +1837,20 @@ def cmd_addtokens(message):
 def cmd_locks(message):
     if not require_admin(message): return
     try:
-        rows = _get_conn().execute("""
+        cur = get_conn().cursor()
+        cur.execute("""
             SELECT user_id, locked_at, reason FROM user_locks
             ORDER BY locked_at DESC LIMIT 50
-        """).fetchall()
+        """)
+        rows = cur.fetchall()
         if not rows:
             safe_send_message(message.chat.id, "✅ Активных lock'ов нет."); return
-        now   = time.time()
+        now = time.time()
         lines = ["🔒 *Активные lock'и:*\n"]
-        for uid, locked_at, reason in rows:
-            age = int(now - locked_at)
+        for r in rows:
+            age = int(now - r['locked_at'])
             m, s = divmod(age, 60)
-            lines.append(f"`{uid}` — {m}м {s}с — {reason or '—'}")
+            lines.append(f"`{r['user_id']}` — {m}м {s}с — {r['reason'] or '—'}")
         safe_send_message(message.chat.id, "\n".join(lines))
     except Exception as e:
         safe_send_message(message.chat.id, f"Ошибка: {e}")
@@ -1851,9 +1861,11 @@ def cmd_unlock(message):
     parts = message.text.strip().split()
     if len(parts) == 1:
         try:
-            with db_tx() as c:
-                cnt = c.execute("SELECT COUNT(*) FROM user_locks").fetchone()[0]
-                c.execute("DELETE FROM user_locks")
+            cur = get_conn().cursor()
+            cur.execute("SELECT COUNT(*) AS cnt FROM user_locks")
+            cnt = cur.fetchone()['cnt']
+            with dbtx() as conn:
+                conn.cursor().execute("DELETE FROM user_locks")
             safe_send_message(message.chat.id, f"🔓 Сняты все lock'и: *{cnt}*")
         except Exception as e:
             safe_send_message(message.chat.id, f"Ошибка: {e}")
