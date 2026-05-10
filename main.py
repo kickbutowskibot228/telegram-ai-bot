@@ -846,7 +846,7 @@ def _extract_retry_after(e):
     m = re.search(r"retry after (\d+)", str(e), re.IGNORECASE)
     return int(m.group(1)) if m else None
 
-def _tg_call(func, *args, max_attempts=3, base_delay=1.5, **kwargs):
+def _tg_call(func, *args, max_attempts=6, base_delay=2.0, **kwargs):
     last = None
     for i in range(max_attempts):
         try:
@@ -858,6 +858,7 @@ def _tg_call(func, *args, max_attempts=3, base_delay=1.5, **kwargs):
             logger.warning("TG attempt %d/%d: %s", i + 1, max_attempts, e)
             if i < max_attempts - 1:
                 time.sleep(sleep_for)
+    logger.error("TG FINAL FAIL after %d attempts: %s", max_attempts, last)
     raise last
 
 def safe_send_message(chat_id, text, **kw):
