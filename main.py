@@ -718,32 +718,32 @@ def get_user_balance_info(user_id):
     ensure_user(user_id)
     cur = get_conn().cursor()
     cur.execute("""
-        SELECT userid, model, freetokens, paidtokens, imagemode,
-               imagemodel, lastfreeresetat FROM users WHERE userid=%s
+        SELECT user_id, model, free_tokens, paid_tokens, image_mode,
+               image_model, last_free_reset_at FROM users WHERE user_id=%s
     """, (user_id,))
     row = cur.fetchone()
     if not row: return None
-    return {"user_id": row['userid'], "model": row['model'],
-            "free_tokens": row['freetokens'], "paid_tokens": row['paidtokens'],
-            "total_tokens": row['freetokens'] + row['paidtokens'],
-            "image_mode": bool(row['imagemode']), "image_model": row['imagemodel'],
-            "last_free_reset_at": row['lastfreeresetat']}
+    return {"user_id": row['user_id'], "model": row['model'],
+            "free_tokens": row['free_tokens'], "paid_tokens": row['paid_tokens'],
+            "total_tokens": row['free_tokens'] + row['paid_tokens'],
+            "image_mode": bool(row['image_mode']), "image_model": row['image_model'],
+            "last_free_reset_at": row['last_free_reset_at']}
 
 def get_users_list(limit=20):
     cur = get_conn().cursor()
     cur.execute("""
-        SELECT userid, model, freetokens, paidtokens FROM users
-        ORDER BY userid DESC LIMIT %s
+        SELECT user_id, model, free_tokens, paid_tokens FROM users
+        ORDER BY user_id DESC LIMIT %s
     """, (limit,))
     rows = cur.fetchall()
-    return [{"user_id": r['userid'], "model": r['model'],
-             "free_tokens": r['freetokens'], "paid_tokens": r['paidtokens'],
-             "total_tokens": r['freetokens'] + r['paidtokens']} for r in rows]
+    return [{"user_id": r['user_id'], "model": r['model'],
+             "free_tokens": r['free_tokens'], "paid_tokens": r['paid_tokens'],
+             "total_tokens": r['free_tokens'] + r['paid_tokens']} for r in rows]
 
 def admin_add_tokens(user_id, amount):
     with dbtx() as conn:
         conn.cursor().execute(
-            "UPDATE users SET paidtokens=paidtokens+%s WHERE userid=%s",
+            "UPDATE users SET paid_tokens=paid_tokens+%s WHERE user_id=%s",
             (amount, user_id)
         )
     user_cache.invalidate(user_id)
