@@ -1889,18 +1889,18 @@ def admin_remove_tokens(message):
         return
     uid, amount = int(parts[1]), int(parts[2])
     cur = get_conn().cursor()
-    cur.execute("SELECT freetokens, paidtokens FROM users WHERE userid=%s", (uid,))
+    cur.execute("SELECT freetokens, paidtokens FROM users WHERE user_id=%s", (uid,))
     row = cur.fetchone()
     if not row:
         safe_send_message(message.chat.id, f"❌ Пользователь {uid} не найден")
         return
-    old_total = row['freetokens'] + row['paidtokens']
+    old_total = row['free_tokens'] + row['paid_tokens']
     # Снимаем сначала с paid, потом с free
-    remove_paid = min(amount, row['paidtokens'])
-    remove_free = min(amount - remove_paid, row['freetokens'])
+    remove_paid = min(amount, row['paid_tokens'])
+    remove_free = min(amount - remove_paid, row['free_tokens'])
     with dbtx() as conn:
         conn.cursor().execute(
-            "UPDATE users SET paidtokens=paidtokens-%s, freetokens=freetokens-%s WHERE userid=%s",
+            "UPDATE users SET paid_tokens=paidtokens-%s, freetokens=freetokens-%s WHERE user_id=%s",
             (remove_paid, remove_free, uid)
         )
     user_cache.invalidate(uid)
@@ -1921,21 +1921,21 @@ def admin_set_balance(message):
         return
     uid, amount = int(parts[1]), int(parts[2])
     cur = get_conn().cursor()
-    cur.execute("SELECT freetokens, paidtokens FROM users WHERE userid=%s", (uid,))
+    cur.execute("SELECT freetokens, paidtokens FROM users WHERE user_id=%s", (uid,))
     row = cur.fetchone()
     if not row:
         safe_send_message(message.chat.id, f"❌ Пользователь {uid} не найден")
         return
-    old_total = row['freetokens'] + row['paidtokens']
+    old_total = row['free_tokens'] + row['paid_tokens']
     with dbtx() as conn:
         conn.cursor().execute(
-            "UPDATE users SET paidtokens=%s WHERE userid=%s",
+            "UPDATE users SET paid_tokens=%s WHERE user_id=%s",
             (amount, uid)
         )
     user_cache.invalidate(uid)
     safe_send_message(message.chat.id,
-        f"✅ Платные токены {uid} установлены: {row['paidtokens']} → {amount}\n"
-        f"Итого: {row['freetokens'] + amount} {TOKEN_EMOJI}")
+        f"✅ Платные токены {uid} установлены: {row['paid_tokens']} → {amount}\n"
+        f"Итого: {row['free_tokens'] + amount} {TOKEN_EMOJI}")
 
 
 # /ban ID — заблокировать пользователя
@@ -1951,7 +1951,7 @@ def admin_ban(message):
     # Обнуляем токены как бан (колонки is_banned нет в схеме)
     with dbtx() as conn:
         conn.cursor().execute(
-            "UPDATE users SET freetokens=0, paidtokens=0 WHERE userid=%s", (uid,)
+            "UPDATE users SET free_tokens=0, paidtokens=0 WHERE user_id=%s", (uid,)
         )
     user_cache.invalidate(uid)
     safe_send_message(message.chat.id, f"🚫 Пользователь {uid} заблокирован (токены обнулены)")
@@ -1969,7 +1969,7 @@ def admin_unban(message):
     uid = int(parts[1])
     with dbtx() as conn:
         conn.cursor().execute(
-            "UPDATE users SET freetokens=%s WHERE userid=%s", (FREE_TOKENS, uid)
+            "UPDATE users SET free_tokens=%s WHERE user_id=%s", (FREE_TOKENS, uid)
         )
     user_cache.invalidate(uid)
     safe_send_message(message.chat.id, f"✅ Пользователь {uid} разблокирован ({FREE_TOKENS} {TOKEN_EMOJI} восстановлено)")
@@ -1990,7 +1990,7 @@ def admin_broadcast(message):
     sent, failed = 0, 0
     for row in users:
         try:
-            bot.send_message(row['userid'], text, parse_mode="Markdown")
+            bot.send_message(row['user_id'], text, parse_mode="Markdown")
             sent += 1
             time.sleep(0.05)  # не флудить Telegram API
         except Exception:
