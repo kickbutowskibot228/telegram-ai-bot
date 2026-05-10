@@ -266,7 +266,7 @@ def build_http_session() -> requests.Session:
     })
     return s
 
-HTTP = _build_http_session()
+HTTP = build_http_session()
 OPENROUTER_HEADERS = {
     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
     "Content-Type": "application/json",
