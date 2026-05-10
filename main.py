@@ -73,7 +73,7 @@ FREE_RESET_COOLDOWN_DAYS = 3
 TOKEN_EMOJI = "🍼"
 GENERATED_DIR = "generated_images"
 GENERATED_VIDEOS_DIR = "generated_videos"
-CHAT_HISTORY_LIMIT = 12
+CHAT_HISTORY_LIMIT = 6
 USER_LOCK_TTL = 20 * 60  # 20 минут
 
 os.makedirs(GENERATED_DIR, exist_ok=True)
@@ -981,7 +981,7 @@ def generate_image_openrouter(model, prompt_text, input_image_data_url=None, max
                "modalities": ["image", "text"]}
     for attempt in range(max_retries):
         try:
-            r = HTTP.post(url, headers=OPENROUTER_HEADERS, json=payload, timeout=180)
+            r = HTTP.post(url, headers=OPENROUTER_HEADERS, json=payload, timeout=120)
             if r.status_code == 200:
                 res = r.json()
                 msg  = (res.get("choices") or [{}])[0].get("message", {})
@@ -1865,6 +1865,7 @@ def cmd_unlock(message):
     safe_send_message(message.chat.id,
         "`/unlock` — все\n`/unlock USER_ID` — конкретный")
 
+# /removetokens ID AMOUNT — снять токены
 @bot.message_handler(commands=["removetokens"])
 def admin_remove_tokens(message):
     if message.from_user.id not in ADMIN_IDS:
@@ -1874,18 +1875,29 @@ def admin_remove_tokens(message):
         safe_send_message(message.chat.id, "❌ Формат: /removetokens ID AMOUNT")
         return
     uid, amount = int(parts[1]), int(parts[2])
-    with get_db() as db:
-        row = db.execute("SELECT balance FROM users WHERE user_id=?", (uid,)).fetchone()
-        if not row:
-            safe_send_message(message.chat.id, f"❌ Пользователь {uid} не найден")
-            return
-        new_bal = max(0, row[0] - amount)
-        db.execute("UPDATE users SET balance=? WHERE user_id=?", (new_bal, uid))
+    cur = get_conn().cursor()
+    cur.execute("SELECT freetokens, paidtokens FROM users WHERE userid=%s", (uid,))
+    row = cur.fetchone()
+    if not row:
+        safe_send_message(message.chat.id, f"❌ Пользователь {uid} не найден")
+        return
+    old_total = row['freetokens'] + row['paidtokens']
+    # Снимаем сначала с paid, потом с free
+    remove_paid = min(amount, row['paidtokens'])
+    remove_free = min(amount - remove_paid, row['freetokens'])
+    with dbtx() as conn:
+        conn.cursor().execute(
+            "UPDATE users SET paidtokens=paidtokens-%s, freetokens=freetokens-%s WHERE userid=%s",
+            (remove_paid, remove_free, uid)
+        )
+    user_cache.invalidate(uid)
+    new_total = old_total - remove_paid - remove_free
     safe_send_message(message.chat.id,
-        f"✅ Снято {amount} токенов у {uid}\n"
-        f"Было: {row[0]} → Стало: {new_bal}")
+        f"✅ Снято {remove_paid + remove_free} {TOKEN_EMOJI} у {uid}\n"
+        f"Было: {old_total} → Стало: {new_total}")
 
-# /setbalance ID AMOUNT — установить баланс точно
+
+# /setbalance ID AMOUNT — установить платные токены точно
 @bot.message_handler(commands=["setbalance"])
 def admin_set_balance(message):
     if message.from_user.id not in ADMIN_IDS:
@@ -1895,14 +1907,23 @@ def admin_set_balance(message):
         safe_send_message(message.chat.id, "❌ Формат: /setbalance ID AMOUNT")
         return
     uid, amount = int(parts[1]), int(parts[2])
-    with get_db() as db:
-        row = db.execute("SELECT balance FROM users WHERE user_id=?", (uid,)).fetchone()
-        if not row:
-            safe_send_message(message.chat.id, f"❌ Пользователь {uid} не найден")
-            return
-        db.execute("UPDATE users SET balance=? WHERE user_id=?", (amount, uid))
+    cur = get_conn().cursor()
+    cur.execute("SELECT freetokens, paidtokens FROM users WHERE userid=%s", (uid,))
+    row = cur.fetchone()
+    if not row:
+        safe_send_message(message.chat.id, f"❌ Пользователь {uid} не найден")
+        return
+    old_total = row['freetokens'] + row['paidtokens']
+    with dbtx() as conn:
+        conn.cursor().execute(
+            "UPDATE users SET paidtokens=%s WHERE userid=%s",
+            (amount, uid)
+        )
+    user_cache.invalidate(uid)
     safe_send_message(message.chat.id,
-        f"✅ Баланс {uid} установлен: {row[0]} → {amount}")
+        f"✅ Платные токены {uid} установлены: {row['paidtokens']} → {amount}\n"
+        f"Итого: {row['freetokens'] + amount} {TOKEN_EMOJI}")
+
 
 # /ban ID — заблокировать пользователя
 @bot.message_handler(commands=["ban"])
@@ -1914,9 +1935,14 @@ def admin_ban(message):
         safe_send_message(message.chat.id, "❌ Формат: /ban ID")
         return
     uid = int(parts[1])
-    with get_db() as db:
-        db.execute("UPDATE users SET is_banned=1 WHERE user_id=?", (uid,))
-    safe_send_message(message.chat.id, f"🚫 Пользователь {uid} заблокирован")
+    # Обнуляем токены как бан (колонки is_banned нет в схеме)
+    with dbtx() as conn:
+        conn.cursor().execute(
+            "UPDATE users SET freetokens=0, paidtokens=0 WHERE userid=%s", (uid,)
+        )
+    user_cache.invalidate(uid)
+    safe_send_message(message.chat.id, f"🚫 Пользователь {uid} заблокирован (токены обнулены)")
+
 
 # /unban ID — разблокировать
 @bot.message_handler(commands=["unban"])
@@ -1928,9 +1954,13 @@ def admin_unban(message):
         safe_send_message(message.chat.id, "❌ Формат: /unban ID")
         return
     uid = int(parts[1])
-    with get_db() as db:
-        db.execute("UPDATE users SET is_banned=0 WHERE user_id=?", (uid,))
-    safe_send_message(message.chat.id, f"✅ Пользователь {uid} разблокирован")
+    with dbtx() as conn:
+        conn.cursor().execute(
+            "UPDATE users SET freetokens=%s WHERE userid=%s", (FREE_TOKENS, uid)
+        )
+    user_cache.invalidate(uid)
+    safe_send_message(message.chat.id, f"✅ Пользователь {uid} разблокирован ({FREE_TOKENS} {TOKEN_EMOJI} восстановлено)")
+
 
 # /broadcast — рассылка всем пользователям
 @bot.message_handler(commands=["broadcast"])
@@ -1941,36 +1971,45 @@ def admin_broadcast(message):
     if not text:
         safe_send_message(message.chat.id, "❌ Формат: /broadcast Текст сообщения")
         return
-    with get_db() as db:
-        users = db.execute("SELECT user_id FROM users WHERE is_banned=0").fetchall()
+    cur = get_conn().cursor()
+    cur.execute("SELECT userid FROM users")
+    users = cur.fetchall()
     sent, failed = 0, 0
-    for (uid,) in users:
+    for row in users:
         try:
-            bot.send_message(uid, text)
+            bot.send_message(row['userid'], text, parse_mode="Markdown")
             sent += 1
+            time.sleep(0.05)  # не флудить Telegram API
         except Exception:
             failed += 1
     safe_send_message(message.chat.id,
         f"📢 Рассылка завершена\n✅ Отправлено: {sent}\n❌ Не доставлено: {failed}")
+
 
 # /stats — общая статистика
 @bot.message_handler(commands=["stats"])
 def admin_stats(message):
     if message.from_user.id not in ADMIN_IDS:
         return
-    with get_db() as db:
-        total = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        banned = db.execute("SELECT COUNT(*) FROM users WHERE is_banned=1").fetchone()[0]
-        total_balance = db.execute("SELECT SUM(balance) FROM users").fetchone()[0] or 0
-        active_today = db.execute(
-            "SELECT COUNT(DISTINCT user_id) FROM messages WHERE created_at >= date('now')"
-        ).fetchone()[0]
+    cur = get_conn().cursor()
+    cur.execute("SELECT COUNT(*) AS cnt FROM users")
+    total = cur.fetchone()['cnt']
+    cur.execute("SELECT COUNT(*) AS cnt FROM users WHERE freetokens > 0 OR paidtokens > 0")
+    active = cur.fetchone()['cnt']
+    cur.execute("SELECT COALESCE(SUM(freetokens + paidtokens), 0) AS total FROM users")
+    total_tokens = cur.fetchone()['total']
+    cur.execute("SELECT COUNT(*) AS cnt FROM payments WHERE status='succeeded'")
+    paid_count = cur.fetchone()['cnt']
+    cur.execute("SELECT COALESCE(SUM(amount), 0) AS total FROM payments WHERE status='succeeded'")
+    revenue = cur.fetchone()['total']
     safe_send_message(message.chat.id,
         f"📊 *Статистика бота*\n\n"
         f"👥 Всего пользователей: {total}\n"
-        f"🚫 Заблокировано: {banned}\n"
-        f"🟢 Активны сегодня: {active_today}\n"
-        f"💰 Токенов в системе: {total_balance:,}")
+        f"💰 С токенами: {active}\n"
+        f"🪙 Токенов в системе: {total_tokens} {TOKEN_EMOJI}\n"
+        f"💳 Оплат: {paid_count}\n"
+        f"💵 Выручка: {revenue} ₽",
+        parse_mode="Markdown")
 
 # ============================================================
 # HANDLERS — кнопки главного меню
