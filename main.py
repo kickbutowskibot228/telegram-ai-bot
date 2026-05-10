@@ -280,7 +280,7 @@ OPENROUTER_HEADERS = {
 # ============================================================
 _db_local = threading.local()
 
-def _get_conn() -> psycopg2.extensions.connection:
+def ___get_conn() -> psycopg2.extensions.connection:
     conn = getattr(_db_local, "conn", None)
     if conn is None or conn.closed:
         conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
@@ -297,7 +297,7 @@ def _get_conn() -> psycopg2.extensions.connection:
 
 @contextmanager
 def db_tx():
-    conn = _get_conn()
+    conn = ___get_conn()
     conn.autocommit = False
     try:
         yield conn
@@ -310,7 +310,7 @@ def db_tx():
         conn.autocommit = True
 
 def init_db():
-    conn = _get_conn()
+    conn = ___get_conn()
     cur = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -485,7 +485,7 @@ def cleanup_stale_locks():
 # ОПЕРАЦИИ С БД
 # ============================================================
 def ensure_user(user_id: int):
-    conn = _get_conn()
+    conn = ___get_conn()
     cur = conn.cursor()
     cur.execute("SELECT 1 FROM users WHERE user_id=%s", (user_id,))
     if cur.fetchone():
@@ -507,7 +507,7 @@ def get_user_data(user_id: int) -> dict:
     if cached is not None:
         return cached
     ensure_user(user_id)
-    cur = _get_conn().cursor()
+    cur = ___get_conn().cursor()
     cur.execute("""
         SELECT model, free_tokens, paid_tokens, image_mode, image_model,
                image_flow, pending_image_prompt, video_mode, video_model,
@@ -626,7 +626,7 @@ def add_chat_message(user_id, role, content):
             (user_id, role, content))
 
 def get_chat_history(user_id, limit=CHAT_HISTORY_LIMIT):
-    cur = _get_conn().cursor()
+    cur = ___get_conn().cursor()
     cur.execute("""
         SELECT role, content FROM chat_history WHERE user_id=%s
         ORDER BY id DESC LIMIT %s
@@ -692,7 +692,7 @@ def create_payment_record(payment_id, idem_key, user_id, plan_key, amount, token
         """, (payment_id, idem_key, user_id, plan_key, amount, tokens_count))
 
 def get_payment_by_id(pid):
-    cur = _get_conn().cursor()
+    cur = ___get_conn().cursor()
     cur.execute("""
         SELECT payment_id, user_id, plan_key, amount, tokens_count, status
         FROM payments WHERE payment_id=%s
@@ -717,7 +717,7 @@ def require_admin(message):
 
 def get_user_balance_info(user_id):
     ensure_user(user_id)
-    cur = get_conn().cursor()
+    cur = __get_conn().cursor()
     cur.execute("""
         SELECT user_id, model, free_tokens, paid_tokens, image_mode,
                image_model, last_free_reset_at FROM users WHERE user_id=%s
@@ -731,7 +731,7 @@ def get_user_balance_info(user_id):
             "last_free_reset_at": row['last_free_reset_at']}
 
 def get_users_list(limit=20):
-    cur = get_conn().cursor()
+    cur = __get_conn().cursor()
     cur.execute("""
         SELECT user_id, model, free_tokens, paid_tokens FROM users
         ORDER BY user_id DESC LIMIT %s
@@ -742,7 +742,7 @@ def get_users_list(limit=20):
              "total_tokens": r['free_tokens'] + r['paid_tokens']} for r in rows]
 
 def admin_add_tokens(user_id, amount):
-    with dbtx() as conn:
+    with db_tx() as conn:
         conn.cursor().execute(
             "UPDATE users SET paid_tokens=paid_tokens+%s WHERE user_id=%s",
             (amount, user_id)
@@ -1627,7 +1627,7 @@ def video_poller_loop():
     while True:
         try:
             now  = time.time()
-            cur = _get_conn().cursor()
+            cur = ___get_conn().cursor()
             cur.execute("""
                 SELECT job_uuid, user_id, chat_id, wait_msg_id, model, cost,
                        polling_url, provider_generation_id, flow, attempts
@@ -1838,7 +1838,7 @@ def cmd_addtokens(message):
 def cmd_locks(message):
     if not require_admin(message): return
     try:
-        cur = get_conn().cursor()
+        cur = __get_conn().cursor()
         cur.execute("""
             SELECT user_id, locked_at, reason FROM user_locks
             ORDER BY locked_at DESC LIMIT 50
@@ -1862,10 +1862,10 @@ def cmd_unlock(message):
     parts = message.text.strip().split()
     if len(parts) == 1:
         try:
-            cur = get_conn().cursor()
+            cur = __get_conn().cursor()
             cur.execute("SELECT COUNT(*) AS cnt FROM user_locks")
             cnt = cur.fetchone()['cnt']
-            with dbtx() as conn:
+            with db_tx() as conn:
                 conn.cursor().execute("DELETE FROM user_locks")
             safe_send_message(message.chat.id, f"🔓 Сняты все lock'и: *{cnt}*")
         except Exception as e:
@@ -1888,7 +1888,7 @@ def admin_remove_tokens(message):
         safe_send_message(message.chat.id, "❌ Формат: /removetokens ID AMOUNT")
         return
     uid, amount = int(parts[1]), int(parts[2])
-    cur = get_conn().cursor()
+    cur = __get_conn().cursor()
     cur.execute("SELECT freetokens, paidtokens FROM users WHERE user_id=%s", (uid,))
     row = cur.fetchone()
     if not row:
@@ -1898,7 +1898,7 @@ def admin_remove_tokens(message):
     # Снимаем сначала с paid, потом с free
     remove_paid = min(amount, row['paid_tokens'])
     remove_free = min(amount - remove_paid, row['free_tokens'])
-    with dbtx() as conn:
+    with db_tx() as conn:
         conn.cursor().execute(
             "UPDATE users SET paid_tokens=paidtokens-%s, freetokens=freetokens-%s WHERE user_id=%s",
             (remove_paid, remove_free, uid)
@@ -1920,14 +1920,14 @@ def admin_set_balance(message):
         safe_send_message(message.chat.id, "❌ Формат: /setbalance ID AMOUNT")
         return
     uid, amount = int(parts[1]), int(parts[2])
-    cur = get_conn().cursor()
+    cur = __get_conn().cursor()
     cur.execute("SELECT freetokens, paidtokens FROM users WHERE user_id=%s", (uid,))
     row = cur.fetchone()
     if not row:
         safe_send_message(message.chat.id, f"❌ Пользователь {uid} не найден")
         return
     old_total = row['free_tokens'] + row['paid_tokens']
-    with dbtx() as conn:
+    with db_tx() as conn:
         conn.cursor().execute(
             "UPDATE users SET paid_tokens=%s WHERE user_id=%s",
             (amount, uid)
@@ -1949,7 +1949,7 @@ def admin_ban(message):
         return
     uid = int(parts[1])
     # Обнуляем токены как бан (колонки is_banned нет в схеме)
-    with dbtx() as conn:
+    with db_tx() as conn:
         conn.cursor().execute(
             "UPDATE users SET free_tokens=0, paidtokens=0 WHERE user_id=%s", (uid,)
         )
@@ -1967,7 +1967,7 @@ def admin_unban(message):
         safe_send_message(message.chat.id, "❌ Формат: /unban ID")
         return
     uid = int(parts[1])
-    with dbtx() as conn:
+    with db_tx() as conn:
         conn.cursor().execute(
             "UPDATE users SET free_tokens=%s WHERE user_id=%s", (FREE_TOKENS, uid)
         )
@@ -1984,7 +1984,7 @@ def admin_broadcast(message):
     if not text:
         safe_send_message(message.chat.id, "❌ Формат: /broadcast Текст сообщения")
         return
-    cur = get_conn().cursor()
+    cur = __get_conn().cursor()
     cur.execute("SELECT userid FROM users")
     users = cur.fetchall()
     sent, failed = 0, 0
@@ -2004,7 +2004,7 @@ def admin_broadcast(message):
 def admin_stats(message):
     if message.from_user.id not in ADMIN_IDS:
         return
-    cur = get_conn().cursor()
+    cur = __get_conn().cursor()
     cur.execute("SELECT COUNT(*) AS cnt FROM users")
     total = cur.fetchone()['cnt']
     cur.execute("SELECT COUNT(*) AS cnt FROM users WHERE freetokens > 0 OR paidtokens > 0")
