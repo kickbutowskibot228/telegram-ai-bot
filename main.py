@@ -2473,8 +2473,10 @@ def start_background_workers():
         fcntl.flock(_video_poller_lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         logger.info("video_poller: acquired lock PID=%s, starting", os.getpid())
         threading.Thread(target=video_poller_loop, name="video-poller", daemon=True).start()
+        _video_poller_lock_fh._is_primary = True
     except BlockingIOError:
         logger.info("video_poller: lock busy in PID=%s, skipping", os.getpid())
+        _video_poller_lock_fh._is_primary = False
     threading.Thread(target=cleanup_old_files_loop, name="file-cleaner", daemon=True).start()
 
 # ============================================================
@@ -2502,7 +2504,10 @@ def _initialize_once():
             start_background_workers()
             log_registered_handlers()
             logger.info("🔧 Webhook setup...")
-            setup_webhook()
+            if getattr(_video_poller_lock_fh, '_is_primary', True):
+                setup_webhook()
+            else:
+                logger.info("⏭  Webhook setup skipped (secondary worker)")
             _initialized = True
             logger.info("✅ Ready (PID=%s)", os.getpid())
         except Exception as e:
