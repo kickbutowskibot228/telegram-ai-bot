@@ -1995,7 +1995,7 @@ def admin_broadcast(message):
         safe_send_message(message.chat.id, "❌ Формат: /broadcast Текст сообщения")
         return
     cur = __get_conn().cursor()
-    cur.execute("SELECT userid FROM users")
+    cur.execute("SELECT user_id FROM users")
     users = cur.fetchall()
     sent, failed = 0, 0
     for row in users:
@@ -2014,25 +2014,30 @@ def admin_broadcast(message):
 def admin_stats(message):
     if message.from_user.id not in ADMIN_IDS:
         return
-    cur = __get_conn().cursor()
-    cur.execute("SELECT COUNT(*) AS cnt FROM users")
-    total = cur.fetchone()['cnt']
-    cur.execute("SELECT COUNT(*) AS cnt FROM users WHERE free_tokens > 0 OR paid_tokens > 0")
-    active = cur.fetchone()['cnt']
-    cur.execute("SELECT COALESCE(SUM(free_tokens + paid_tokens), 0) AS total FROM users")
-    total_tokens = cur.fetchone()['total']
-    cur.execute("SELECT COUNT(*) AS cnt FROM payments WHERE status='succeeded'")
-    paid_count = cur.fetchone()['cnt']
-    cur.execute("SELECT COALESCE(SUM(amount), 0) AS total FROM payments WHERE status='succeeded'")
-    revenue = cur.fetchone()['total']
-    safe_send_message(message.chat.id,
-        f"📊 *Статистика бота*\n\n"
-        f"👥 Всего пользователей: {total}\n"
-        f"💰 С токенами: {active}\n"
-        f"🪙 Токенов в системе: {total_tokens} {TOKEN_EMOJI}\n"
-        f"💳 Оплат: {paid_count}\n"
-        f"💵 Выручка: {revenue} ₽",
-        parse_mode="Markdown")
+    try:
+        cur = __get_conn().cursor()
+        cur.execute("SELECT COUNT(*) AS cnt FROM users")
+        total = cur.fetchone()['cnt']
+        cur.execute("SELECT COUNT(*) AS cnt FROM users WHERE free_tokens > 0 OR paid_tokens > 0")
+        active = cur.fetchone()['cnt']
+        cur.execute("SELECT COALESCE(SUM(free_tokens + paid_tokens), 0) AS total FROM users")
+        total_tokens = cur.fetchone()['total']
+        cur.execute("SELECT COUNT(*) AS cnt FROM payments WHERE status='succeeded'")
+        paid_count = cur.fetchone()['cnt']
+        cur.execute("SELECT COALESCE(SUM(amount), 0) AS total FROM payments WHERE status='succeeded'")
+        revenue = cur.fetchone()['total']
+        safe_send_message(message.chat.id,
+            f"📊 *Статистика бота*\n\n"
+            f"👥 Всего пользователей: {total}\n"
+            f"💰 С токенами: {active}\n"
+            f"🪙 Токенов в системе: {total_tokens} {TOKEN_EMOJI}\n"
+            f"💳 Оплат: {paid_count}\n"
+            f"💵 Выручка: {revenue} ₽",
+            parse_mode="Markdown")
+    except Exception as e:
+        import traceback
+        logger.error("admin_stats error: %s\n%s", e, traceback.format_exc())
+        safe_send_message(message.chat.id, f"❌ /stats ошибка: {e}")
 
 # ============================================================
 # HANDLERS — кнопки главного меню
