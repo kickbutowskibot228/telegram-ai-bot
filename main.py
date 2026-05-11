@@ -2462,19 +2462,19 @@ def cleanup_old_files_loop():
             logger.exception("cleanup loop: %s", e)
         time.sleep(30 * 60)
 
+_video_poller_lock_fh = None  # держим глобально чтобы flock не снялся
+
 def start_background_workers():
-    # Запускаем поллер только в одном воркере (по os.getpid % workers)
-    # Используем файл-блокировку чтобы только один процесс запустил поллер
+    global _video_poller_lock_fh
     import fcntl
     lock_path = "/tmp/video_poller.lock"
-    lock_file = open(lock_path, "w")
+    _video_poller_lock_fh = open(lock_path, "w")
     try:
-        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        # Захватили блокировку — мы первый воркер, запускаем поллер
-        logger.info("video_poller: acquired lock, starting")
+        fcntl.flock(_video_poller_lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        logger.info("video_poller: acquired lock PID=%s, starting", os.getpid())
         threading.Thread(target=video_poller_loop, name="video-poller", daemon=True).start()
     except BlockingIOError:
-        logger.info("video_poller: lock busy, skipping in this worker")
+        logger.info("video_poller: lock busy in PID=%s, skipping", os.getpid())
     threading.Thread(target=cleanup_old_files_loop, name="file-cleaner", daemon=True).start()
 
 # ============================================================
