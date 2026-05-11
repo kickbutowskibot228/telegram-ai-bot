@@ -1899,7 +1899,7 @@ def admin_remove_tokens(message):
         return
     uid, amount = int(parts[1]), int(parts[2])
     cur = __get_conn().cursor()
-    cur.execute("SELECT freetokens, paidtokens FROM users WHERE user_id=%s", (uid,))
+    cur.execute("SELECT free_tokens, paid_tokens FROM users WHERE user_id=%s", (uid,))
     row = cur.fetchone()
     if not row:
         safe_send_message(message.chat.id, f"❌ Пользователь {uid} не найден")
@@ -1910,7 +1910,7 @@ def admin_remove_tokens(message):
     remove_free = min(amount - remove_paid, row['free_tokens'])
     with db_tx() as conn:
         conn.cursor().execute(
-            "UPDATE users SET paid_tokens=paidtokens-%s, freetokens=freetokens-%s WHERE user_id=%s",
+            "UPDATE users SET paid_tokens=paid_tokens-%s, free_tokens=free_tokens-%s WHERE user_id=%s",
             (remove_paid, remove_free, uid)
         )
     user_cache.invalidate(uid)
@@ -1931,7 +1931,7 @@ def admin_set_balance(message):
         return
     uid, amount = int(parts[1]), int(parts[2])
     cur = __get_conn().cursor()
-    cur.execute("SELECT freetokens, paidtokens FROM users WHERE user_id=%s", (uid,))
+    cur.execute("SELECT free_tokens, paid_tokens FROM users WHERE user_id=%s", (uid,))
     row = cur.fetchone()
     if not row:
         safe_send_message(message.chat.id, f"❌ Пользователь {uid} не найден")
@@ -1961,7 +1961,7 @@ def admin_ban(message):
     # Обнуляем токены как бан (колонки is_banned нет в схеме)
     with db_tx() as conn:
         conn.cursor().execute(
-            "UPDATE users SET free_tokens=0, paidtokens=0 WHERE user_id=%s", (uid,)
+            "UPDATE users SET free_tokens=0, paid_tokens=0 WHERE user_id=%s", (uid,)
         )
     user_cache.invalidate(uid)
     safe_send_message(message.chat.id, f"🚫 Пользователь {uid} заблокирован (токены обнулены)")
@@ -2017,9 +2017,9 @@ def admin_stats(message):
     cur = __get_conn().cursor()
     cur.execute("SELECT COUNT(*) AS cnt FROM users")
     total = cur.fetchone()['cnt']
-    cur.execute("SELECT COUNT(*) AS cnt FROM users WHERE freetokens > 0 OR paidtokens > 0")
+    cur.execute("SELECT COUNT(*) AS cnt FROM users WHERE free_tokens > 0 OR paid_tokens > 0")
     active = cur.fetchone()['cnt']
-    cur.execute("SELECT COALESCE(SUM(freetokens + paidtokens), 0) AS total FROM users")
+    cur.execute("SELECT COALESCE(SUM(free_tokens + paid_tokens), 0) AS total FROM users")
     total_tokens = cur.fetchone()['total']
     cur.execute("SELECT COUNT(*) AS cnt FROM payments WHERE status='succeeded'")
     paid_count = cur.fetchone()['cnt']
