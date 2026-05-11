@@ -1642,8 +1642,12 @@ def video_poller_loop():
             rows = cur.fetchall()
             for r in rows:
                 with db_tx() as conn:
-                    conn.cursor().execute(
-                        "UPDATE generation_jobs SET next_poll_at=%s WHERE job_uuid=%s",
+                    res = conn.cursor()
+                    res.execute(
+                        """UPDATE generation_jobs
+                           SET next_poll_at=%s, status='polling'
+                           WHERE job_uuid=%s
+                           AND status NOT IN ('delivered','failed','cancelled')""",
                         (now + VIDEO_POLL_INTERVAL, r["job_uuid"]))
                 submit_task(_poll_video_job, {
                     "job_uuid": r["job_uuid"], "user_id": r["user_id"],
@@ -2459,7 +2463,18 @@ def cleanup_old_files_loop():
         time.sleep(30 * 60)
 
 def start_background_workers():
-    threading.Thread(target=video_poller_loop,    name="video-poller",  daemon=True).start()
+    # Запускаем поллер только в одном воркере (по os.getpid % workers)
+    # Используем файл-блокировку чтобы только один процесс запустил поллер
+    import fcntl
+    lock_path = "/tmp/video_poller.lock"
+    lock_file = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Захватили блокировку — мы первый воркер, запускаем поллер
+        logger.info("video_poller: acquired lock, starting")
+        threading.Thread(target=video_poller_loop, name="video-poller", daemon=True).start()
+    except BlockingIOError:
+        logger.info("video_poller: lock busy, skipping in this worker")
     threading.Thread(target=cleanup_old_files_loop, name="file-cleaner", daemon=True).start()
 
 # ============================================================
