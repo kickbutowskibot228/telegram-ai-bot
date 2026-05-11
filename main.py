@@ -767,7 +767,7 @@ def get_text_models_keyboard():
     kb = types.InlineKeyboardMarkup()
     for model_id, cfg in TEXT_MODELS_CONFIG.items():
         kb.add(types.InlineKeyboardButton(
-            f"{cfg.get('emoji','🤖')} {cfg['name']} — {cfg['cost']} {TOKEN_EMOJI}  {cfg.get('description','')}",
+            f"{cfg.get('emoji','🤖')} {cfg['name']} — {cfg['cost']} {TOKEN_EMOJI}",
             callback_data=f"model:{model_id}"
         ))
     return kb
