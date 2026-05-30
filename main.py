@@ -110,8 +110,8 @@ TEXT_MODELS_CONFIG = {
         "emoji": "⚡",
         "description": "Быстрая и дешёвая",
     },
-    "openai/gpt-5.4": {
-        "name": "GPT-5.4",
+    "openai/gpt-4o-mini": {
+        "name": "GPT",
         "cost": 25,
         "emoji": "🤖",
         "description": "Мощная модель OpenAI",
@@ -122,7 +122,7 @@ TEXT_MODELS_CONFIG = {
         "emoji": "🎭",
         "description": "Умная и точная",
     },
-    "deepseek/deepseek-v3.2": {
+    "deepseek/deepseek-v4-flash": {
         "name": "DeepSeek",
         "cost": 5,
         "emoji": "🐳",
