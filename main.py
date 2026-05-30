@@ -70,6 +70,8 @@ if not DATABASE_URL:
 _redis = redis_lib.from_url(REDIS_URL, decode_responses=True)
 FREE_TOKENS = 30
 FREE_RESET_COOLDOWN_DAYS = 3
+REFERRAL_BONUS_REFERRER = 50
+REFERRAL_BONUS_REFERRED = 30
 TOKEN_EMOJI = "🍼"
 GENERATED_DIR = "generated_images"
 GENERATED_VIDEOS_DIR = "generated_videos"
@@ -89,8 +91,9 @@ BTN_BALANCE = "📊 Баланс"
 BTN_TOPUP   = "💳 Пополнение"
 BTN_RESET   = "🔄 Сброс"
 BTN_SUPPORT = "🛟 Поддержка"
+BTN_REFERRAL = "🔗 Пригласить друга"
 
-MENU_BUTTONS = {BTN_AI, BTN_PHOTO, BTN_VIDEO, BTN_BALANCE, BTN_TOPUP, BTN_SUPPORT, BTN_RESET}
+MENU_BUTTONS = {BTN_AI, BTN_PHOTO, BTN_VIDEO, BTN_BALANCE, BTN_TOPUP, BTN_SUPPORT, BTN_RESET, BTN_REFERRAL}
 
 SUPPORT_USERNAME = "ai_patriot_support"
 SUPPORT_URL = f"https://t.me/{SUPPORT_USERNAME}"
@@ -758,6 +761,7 @@ def get_main_keyboard():
     kb.row(BTN_PHOTO, BTN_VIDEO)
     kb.row(BTN_BALANCE, BTN_TOPUP)
     kb.row(BTN_SUPPORT, BTN_RESET)
+    kb.row(BTN_REFERRAL)
     return kb
 
 def get_current_keyboard(user_id): return get_main_keyboard()
@@ -1664,6 +1668,60 @@ def video_poller_loop():
 # ============================================================
 # HANDLERS — команды
 # ============================================================
+
+# ============================================================
+# РЕФЕРАЛЬНАЯ СИСТЕМА
+# ============================================================
+def process_referral(referrer_id: int, new_user_id: int):
+    if referrer_id == new_user_id:
+        return
+    try:
+        with db_tx() as conn:
+            c = conn.cursor()
+            c.execute("SELECT 1 FROM referrals WHERE referred_id=%s", (new_user_id,))
+            if c.fetchone():
+                return
+            c.execute("INSERT INTO referrals (referrer_id, referred_id, rewarded) VALUES (%s,%s,1)", (referrer_id, new_user_id))
+            c.execute("UPDATE users SET paid_tokens=paid_tokens+%s, referral_count=referral_count+1 WHERE user_id=%s", (REFERRAL_BONUS_REFERRER, referrer_id))
+            c.execute("UPDATE users SET paid_tokens=paid_tokens+%s, referred_by=%s WHERE user_id=%s", (REFERRAL_BONUS_REFERRED, referrer_id, new_user_id))
+        user_cache.invalidate(referrer_id)
+        user_cache.invalidate(new_user_id)
+        try:
+            safe_send_message(referrer_id, chr(0x1F389) + chr(0x20) + chr(0x41F) + chr(0x43E) + chr(0x20) + chr(0x442) + chr(0x432) + chr(0x43E) + chr(0x435) + chr(0x439) + chr(0x20) + chr(0x441) + chr(0x441) + chr(0x44B) + chr(0x43B) + chr(0x43A) + chr(0x435) + chr(0x20) + chr(0x437) + chr(0x430) + chr(0x440) + chr(0x435) + chr(0x433) + chr(0x438) + chr(0x441) + chr(0x442) + chr(0x440) + chr(0x438) + chr(0x440) + chr(0x43E) + chr(0x432) + chr(0x430) + chr(0x43B) + chr(0x441) + chr(0x44F) + chr(0x20) + chr(0x43D) + chr(0x43E) + chr(0x432) + chr(0x44B) + chr(0x439) + chr(0x20) + chr(0x43F) + chr(0x43E) + chr(0x43B) + chr(0x44C) + chr(0x437) + chr(0x43E) + chr(0x432) + chr(0x430) + chr(0x442) + chr(0x435) + chr(0x43B) + chr(0x44C) + chr(0x21) + chr(0xA) + chr(0x2B) + chr(0x20) + chr(0x54) + chr(0x65) + chr(0x62) + chr(0x65) + chr(0x20) + chr(0x6E) + chr(0x61) + chr(0x63) + chr(0x68) + chr(0x69) + chr(0x73) + chr(0x6C) + chr(0x65) + chr(0x6E) + chr(0x6F) + chr(0x20) + chr(0x2A) + chr(0x2B) + str(REFERRAL_BONUS_REFERRER) + chr(0x2A) + chr(0x20) + TOKEN_EMOJI)
+        except Exception:
+            pass
+        logger.info("Referral: referrer=%s new_user=%s", referrer_id, new_user_id)
+    except Exception as e:
+        logger.exception("process_referral error: %s", e)
+
+
+def get_referral_stats(user_id: int) -> dict:
+    cur = _get_conn().cursor()
+    cur.execute("SELECT COUNT(*) AS cnt FROM referrals WHERE referrer_id=%s", (user_id,))
+    row = cur.fetchone()
+    return {"count": row["cnt"] if row else 0}
+
+
+@bot.message_handler(commands=["referral", "ref"])
+@bot.message_handler(func=lambda m: m.text == BTN_REFERRAL)
+def cmd_referral(message):
+    uid = message.from_user.id
+    ensure_user(uid)
+    stats = get_referral_stats(uid)
+    try:
+        bot_username = bot.get_me().username
+    except Exception:
+        bot_username = "ai_patriot_bot"
+    ref_link = f"https://t.me/{bot_username}?start=ref_{uid}"
+    safe_send_message(
+        message.chat.id,
+        "🔗 *Твоя реферальная ссылка:*\n" + ref_link + "\n\n"
+        + "👥 Приглашено друзей: *" + str(stats["count"]) + "*\n\n"
+        + "💡 За каждого нового пользователя:\n"
+        + "• Тебе: *+" + str(REFERRAL_BONUS_REFERRER) + "* " + TOKEN_EMOJI + "\n"
+        + "• Другу: *+" + str(REFERRAL_BONUS_REFERRED) + "* " + TOKEN_EMOJI,
+        reply_markup=get_main_keyboard()
+    )
 @bot.message_handler(commands=['start'])
 def cmdstart(message):
     logger.info('start user=%s', message.from_user.id)
