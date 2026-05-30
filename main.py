@@ -767,7 +767,7 @@ def get_text_models_keyboard():
     kb = types.InlineKeyboardMarkup()
     for model_id, cfg in TEXT_MODELS_CONFIG.items():
         kb.add(types.InlineKeyboardButton(
-            f"{cfg.get('emoji','🤖')} {cfg['name']} — {cfg['cost']} {TOKEN_EMOJI}  {cfg.get('description','')}",
+            f"{cfg.get('emoji','🤖')} {cfg['name']} — {cfg['cost']} {TOKEN_EMOJI}",
             callback_data=f"model:{model_id}"
         ))
     return kb
@@ -1899,7 +1899,7 @@ def admin_remove_tokens(message):
         return
     uid, amount = int(parts[1]), int(parts[2])
     cur = __get_conn().cursor()
-    cur.execute("SELECT freetokens, paidtokens FROM users WHERE user_id=%s", (uid,))
+    cur.execute("SELECT free_tokens, paid_tokens FROM users WHERE user_id=%s", (uid,))
     row = cur.fetchone()
     if not row:
         safe_send_message(message.chat.id, f"❌ Пользователь {uid} не найден")
@@ -1910,7 +1910,7 @@ def admin_remove_tokens(message):
     remove_free = min(amount - remove_paid, row['free_tokens'])
     with db_tx() as conn:
         conn.cursor().execute(
-            "UPDATE users SET paid_tokens=paidtokens-%s, freetokens=freetokens-%s WHERE user_id=%s",
+            "UPDATE users SET paid_tokens=paid_tokens-%s, free_tokens=free_tokens-%s WHERE user_id=%s",
             (remove_paid, remove_free, uid)
         )
     user_cache.invalidate(uid)
@@ -1931,7 +1931,7 @@ def admin_set_balance(message):
         return
     uid, amount = int(parts[1]), int(parts[2])
     cur = __get_conn().cursor()
-    cur.execute("SELECT freetokens, paidtokens FROM users WHERE user_id=%s", (uid,))
+    cur.execute("SELECT free_tokens, paid_tokens FROM users WHERE user_id=%s", (uid,))
     row = cur.fetchone()
     if not row:
         safe_send_message(message.chat.id, f"❌ Пользователь {uid} не найден")
@@ -1961,7 +1961,7 @@ def admin_ban(message):
     # Обнуляем токены как бан (колонки is_banned нет в схеме)
     with db_tx() as conn:
         conn.cursor().execute(
-            "UPDATE users SET free_tokens=0, paidtokens=0 WHERE user_id=%s", (uid,)
+            "UPDATE users SET free_tokens=0, paid_tokens=0 WHERE user_id=%s", (uid,)
         )
     user_cache.invalidate(uid)
     safe_send_message(message.chat.id, f"🚫 Пользователь {uid} заблокирован (токены обнулены)")
@@ -1995,7 +1995,7 @@ def admin_broadcast(message):
         safe_send_message(message.chat.id, "❌ Формат: /broadcast Текст сообщения")
         return
     cur = __get_conn().cursor()
-    cur.execute("SELECT userid FROM users")
+    cur.execute("SELECT user_id FROM users")
     users = cur.fetchall()
     sent, failed = 0, 0
     for row in users:
@@ -2014,25 +2014,30 @@ def admin_broadcast(message):
 def admin_stats(message):
     if message.from_user.id not in ADMIN_IDS:
         return
-    cur = __get_conn().cursor()
-    cur.execute("SELECT COUNT(*) AS cnt FROM users")
-    total = cur.fetchone()['cnt']
-    cur.execute("SELECT COUNT(*) AS cnt FROM users WHERE freetokens > 0 OR paidtokens > 0")
-    active = cur.fetchone()['cnt']
-    cur.execute("SELECT COALESCE(SUM(freetokens + paidtokens), 0) AS total FROM users")
-    total_tokens = cur.fetchone()['total']
-    cur.execute("SELECT COUNT(*) AS cnt FROM payments WHERE status='succeeded'")
-    paid_count = cur.fetchone()['cnt']
-    cur.execute("SELECT COALESCE(SUM(amount), 0) AS total FROM payments WHERE status='succeeded'")
-    revenue = cur.fetchone()['total']
-    safe_send_message(message.chat.id,
-        f"📊 *Статистика бота*\n\n"
-        f"👥 Всего пользователей: {total}\n"
-        f"💰 С токенами: {active}\n"
-        f"🪙 Токенов в системе: {total_tokens} {TOKEN_EMOJI}\n"
-        f"💳 Оплат: {paid_count}\n"
-        f"💵 Выручка: {revenue} ₽",
-        parse_mode="Markdown")
+    try:
+        cur = __get_conn().cursor()
+        cur.execute("SELECT COUNT(*) AS cnt FROM users")
+        total = cur.fetchone()['cnt']
+        cur.execute("SELECT COUNT(*) AS cnt FROM users WHERE free_tokens > 0 OR paid_tokens > 0")
+        active = cur.fetchone()['cnt']
+        cur.execute("SELECT COALESCE(SUM(free_tokens + paid_tokens), 0) AS total FROM users")
+        total_tokens = cur.fetchone()['total']
+        cur.execute("SELECT COUNT(*) AS cnt FROM payments WHERE status='succeeded'")
+        paid_count = cur.fetchone()['cnt']
+        cur.execute("SELECT COALESCE(SUM(amount), 0) AS total FROM payments WHERE status='succeeded'")
+        revenue = cur.fetchone()['total']
+        safe_send_message(message.chat.id,
+            f"📊 *Статистика бота*\n\n"
+            f"👥 Всего пользователей: {total}\n"
+            f"💰 С токенами: {active}\n"
+            f"🪙 Токенов в системе: {total_tokens} {TOKEN_EMOJI}\n"
+            f"💳 Оплат: {paid_count}\n"
+            f"💵 Выручка: {revenue} ₽",
+            parse_mode="Markdown")
+    except Exception as e:
+        import traceback
+        logger.error("admin_stats error: %s\n%s", e, traceback.format_exc())
+        safe_send_message(message.chat.id, f"❌ /stats ошибка: {e}")
 
 # ============================================================
 # HANDLERS — кнопки главного меню
