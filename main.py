@@ -760,8 +760,8 @@ def get_main_keyboard():
     kb.row(BTN_AI)
     kb.row(BTN_PHOTO, BTN_VIDEO)
     kb.row(BTN_BALANCE, BTN_TOPUP)
-    kb.row(BTN_SUPPORT, BTN_RESET)
-    kb.row(BTN_REFERRAL)
+    kb.row(BTN_SUPPORT, BTN_REFERRAL)
+    kb.row(BTN_RESET)
     return kb
 
 def get_current_keyboard(user_id): return get_main_keyboard()
@@ -1672,6 +1672,7 @@ def video_poller_loop():
 # ============================================================
 # РЕФЕРАЛЬНАЯ СИСТЕМА
 # ============================================================
+MSG_REFERRAL_NOTIFY = "🎉 По твоей ссылке зарегистрировался новый пользователь!\nНачислено +"
 def process_referral(referrer_id: int, new_user_id: int):
     if referrer_id == new_user_id:
         return
@@ -1687,7 +1688,7 @@ def process_referral(referrer_id: int, new_user_id: int):
         user_cache.invalidate(referrer_id)
         user_cache.invalidate(new_user_id)
         try:
-            safe_send_message(referrer_id, chr(0x1F389) + chr(0x20) + chr(0x41F) + chr(0x43E) + chr(0x20) + chr(0x442) + chr(0x432) + chr(0x43E) + chr(0x435) + chr(0x439) + chr(0x20) + chr(0x441) + chr(0x441) + chr(0x44B) + chr(0x43B) + chr(0x43A) + chr(0x435) + chr(0x20) + chr(0x437) + chr(0x430) + chr(0x440) + chr(0x435) + chr(0x433) + chr(0x438) + chr(0x441) + chr(0x442) + chr(0x440) + chr(0x438) + chr(0x440) + chr(0x43E) + chr(0x432) + chr(0x430) + chr(0x43B) + chr(0x441) + chr(0x44F) + chr(0x20) + chr(0x43D) + chr(0x43E) + chr(0x432) + chr(0x44B) + chr(0x439) + chr(0x20) + chr(0x43F) + chr(0x43E) + chr(0x43B) + chr(0x44C) + chr(0x437) + chr(0x43E) + chr(0x432) + chr(0x430) + chr(0x442) + chr(0x435) + chr(0x43B) + chr(0x44C) + chr(0x21) + chr(0xA) + chr(0x2B) + chr(0x20) + chr(0x54) + chr(0x65) + chr(0x62) + chr(0x65) + chr(0x20) + chr(0x6E) + chr(0x61) + chr(0x63) + chr(0x68) + chr(0x69) + chr(0x73) + chr(0x6C) + chr(0x65) + chr(0x6E) + chr(0x6F) + chr(0x20) + chr(0x2A) + chr(0x2B) + str(REFERRAL_BONUS_REFERRER) + chr(0x2A) + chr(0x20) + TOKEN_EMOJI)
+            safe_send_message(referrer_id, f"🎉 По твоей ссылке зарегистрировался новый пользователь! +{REFERRAL_BONUS_REFERRER} {TOKEN_EMOJI}")
         except Exception:
             pass
         logger.info("Referral: referrer=%s new_user=%s", referrer_id, new_user_id)
@@ -1696,37 +1697,48 @@ def process_referral(referrer_id: int, new_user_id: int):
 
 
 def get_referral_stats(user_id: int) -> dict:
-    cur = _get_conn().cursor()
+    cur = ___get_conn().cursor()
     cur.execute("SELECT COUNT(*) AS cnt FROM referrals WHERE referrer_id=%s", (user_id,))
     row = cur.fetchone()
     return {"count": row["cnt"] if row else 0}
 
 
-@bot.message_handler(commands=["referral", "ref"])
-@bot.message_handler(func=lambda m: m.text == BTN_REFERRAL)
+@bot.message_handler(func=lambda m: m.text == BTN_REFERRAL or (m.text and m.text.startswith("/referral")) or (m.text and m.text.startswith("/ref")))
 def cmd_referral(message):
-    uid = message.from_user.id
-    ensure_user(uid)
-    stats = get_referral_stats(uid)
+    logger.info("🔗 referral handler called user=%s text=%r", message.from_user.id, message.text)
     try:
-        bot_username = bot.get_me().username
-    except Exception:
-        bot_username = "ai_patriot_bot"
-    ref_link = f"https://t.me/{bot_username}?start=ref_{uid}"
-    safe_send_message(
-        message.chat.id,
-        "🔗 *Твоя реферальная ссылка:*\n" + ref_link + "\n\n"
-        + "👥 Приглашено друзей: *" + str(stats["count"]) + "*\n\n"
-        + "💡 За каждого нового пользователя:\n"
-        + "• Тебе: *+" + str(REFERRAL_BONUS_REFERRER) + "* " + TOKEN_EMOJI + "\n"
-        + "• Другу: *+" + str(REFERRAL_BONUS_REFERRED) + "* " + TOKEN_EMOJI,
-        reply_markup=get_main_keyboard()
-    )
+        uid = message.from_user.id
+        ensure_user(uid)
+        stats = get_referral_stats(uid)
+        try:
+            bot_username = bot.get_me().username
+        except Exception:
+            bot_username = "ai_patriot_bot"
+        ref_link = f"https://t.me/{bot_username}?start=ref_{uid}"
+        safe_send_message(
+            message.chat.id,
+            "🔗 *Твоя реферальная ссылка:*\n" + ref_link.replace("_", "\_") + "\n\n"
+            + "👥 Приглашено друзей: *" + str(stats["count"]) + "*\n\n"
+            + "💡 За каждого нового пользователя:\n"
+            + "• Тебе: *+" + str(REFERRAL_BONUS_REFERRER) + "* " + TOKEN_EMOJI + "\n"
+            + "• Другу: *+" + str(REFERRAL_BONUS_REFERRED) + "* " + TOKEN_EMOJI,
+            reply_markup=get_main_keyboard()
+        )
+    except Exception as e:
+        logger.exception("🔗 referral error: %s", e)
 @bot.message_handler(commands=['start'])
 def cmdstart(message):
     logger.info('start user=%s', message.from_user.id)
     uid = message.from_user.id
     ensure_user(uid)
+    try:
+        parts = message.text.split()
+        if len(parts) > 1 and parts[1].startswith('ref_'):
+            referrer_id = int(parts[1][4:])
+            if referrer_id != uid:
+                process_referral(referrer_id, uid)
+    except Exception as e:
+        logger.exception('referral start error: %s', e)
     clear_chat_history(uid)
     clear_image_state(uid)
     clear_video_state(uid)
